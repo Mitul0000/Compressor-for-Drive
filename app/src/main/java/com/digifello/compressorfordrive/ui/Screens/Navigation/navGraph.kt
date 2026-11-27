@@ -1,2 +1,34 @@
 package com.digifello.compressorfordrive.ui.Screens.Navigation
 
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.digifello.compressorfordrive.ui.Screens.Home.HomeScreen
+import com.digifello.compressorfordrive.ui.Screens.Home.HomeViewModel
+import com.digifello.compressorfordrive.ui.Screens.Splash.SplashScreen
+
+@Composable
+fun AppNavGraph() {
+    val navController = rememberNavController()
+    // Created here so the splash and the home screen share one ViewModel (and one login check).
+    val vm: HomeViewModel = viewModel()
+    val state by vm.state.collectAsStateWithLifecycle()
+
+    NavHost(navController = navController, startDestination = Routes.SPLASH) {
+        composable(Routes.SPLASH) {
+            SplashScreen(
+                ready = state.ready,
+                onReady = {
+                    navController.navigate(Routes.HOME) {
+                        popUpTo(Routes.SPLASH) { inclusive = true }
+                    }
+                },
+            )
+        }
+        composable(Routes.HOME) { HomeScreen(vm) }
+    }
+}
