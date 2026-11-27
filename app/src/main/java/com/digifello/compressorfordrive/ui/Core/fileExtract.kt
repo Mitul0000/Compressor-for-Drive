@@ -30,8 +30,12 @@ data class DriveFile(
     val ownedByMe: Boolean,
     val shared: Boolean,
     val modifiedTime: String?,
-    val alreadyCompressed: Boolean,
+    val compressState: String?,
 ) {
+    val alreadyCompressed: Boolean get() = compressState != null
+
+    val needsCleanup: Boolean get() = compressState == DriveApi.STATE_PENDING
+
     val kind: FileKind
         get() = when {
             mimeType == "image/jpeg" || mimeType == "image/png" -> FileKind.IMAGE
@@ -47,7 +51,6 @@ fun List<DriveFile>.summarize(): Map<FileKind, KindSummary> =
     groupBy { it.kind }.mapValues { (_, list) -> KindSummary(list.size, list.sumOf { it.size }) }
 
 class DriveApiException(val code: Int, message: String) : IOException(message)
-
 
 class DriveApi(
     private val tokenProvider: suspend () -> String,
@@ -70,7 +73,6 @@ class DriveApi(
         )
     }
 
-
     suspend fun listFiles(onProgress: (Int) -> Unit = {}): List<DriveFile> = withContext(Dispatchers.IO) {
         val all = mutableListOf<DriveFile>()
         var pageToken: String? = null
@@ -89,7 +91,7 @@ class DriveApi(
             if (files != null) {
                 for (i in 0 until files.length()) {
                     val f = files.getJSONObject(i)
-                    val size = f.optString("size").toLongOrNull() ?: continue // skips Google-native files
+                    val size = f.optString("size").toLongOrNull() ?: continue
                     all += DriveFile(
                         id = f.getString("id"),
                         name = f.optString("name"),
@@ -99,7 +101,9 @@ class DriveApi(
                         ownedByMe = f.optBoolean("ownedByMe", false),
                         shared = f.optBoolean("shared", false),
                         modifiedTime = f.optString("modifiedTime").ifEmpty { null },
-                        alreadyCompressed = f.optJSONObject("appProperties")?.has(PROP_COMPRESSED) == true,
+                        compressState = f.optJSONObject("appProperties")
+                            ?.optString(PROP_COMPRESSED)
+                            ?.ifEmpty { null },
                     )
                 }
             }
@@ -154,6 +158,13 @@ class DriveApi(
 
     companion object {
         private const val BASE = "https://www.googleapis.com/drive/v3"
+
         const val PROP_COMPRESSED = "compressedByApp"
+
+        const val STATE_PENDING = "pending"
+
+        const val STATE_DONE = "done"
+
+        const val STATE_FAILED = "failed"
     }
 }

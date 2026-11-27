@@ -9,7 +9,6 @@ import java.io.File
 import kotlin.math.abs
 import kotlin.math.max
 
-
 object SimilarityCheck {
 
     private const val IMAGE_COMPARE_SIDE = 1024
@@ -26,8 +25,6 @@ object SimilarityCheck {
         fun passes(threshold: Double) = durationMatches && audioMatches && similarity >= threshold
     }
 
-
-
     fun imageSimilarity(original: File, compressed: File): Double {
         val a = decodeForCompare(original, IMAGE_COMPARE_SIDE) ?: return 0.0
         val b = decodeForCompare(compressed, IMAGE_COMPARE_SIDE)
@@ -42,8 +39,6 @@ object SimilarityCheck {
             b.recycle()
         }
     }
-
-
 
     fun videoSimilarity(original: File, compressed: File): VideoCheck {
         val ra = MediaMetadataRetriever()
@@ -63,7 +58,7 @@ object SimilarityCheck {
 
             val scores = mutableListOf<Double>()
             for (i in 1..VIDEO_SAMPLES) {
-                val timeUs = durA * 1000L * (2 * i - 1) / (2 * VIDEO_SAMPLES) // 10%, 30%, 50%, 70%, 90%
+                val timeUs = durA * 1000L * (2 * i - 1) / (2 * VIDEO_SAMPLES)
                 val fa = ra.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST) ?: continue
                 val fb = rb.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
                 if (fb == null) {
@@ -82,8 +77,6 @@ object SimilarityCheck {
             rb.release()
         }
     }
-
-
 
     fun bitmapSimilarity(a: Bitmap, b: Bitmap): Double {
         val bb = if (b.width == a.width && b.height == a.height) b
@@ -132,8 +125,6 @@ object SimilarityCheck {
             if (bb !== b) bb.recycle()
         }
     }
-
-
 
     private fun luma(bmp: Bitmap): IntArray {
         val w = bmp.width

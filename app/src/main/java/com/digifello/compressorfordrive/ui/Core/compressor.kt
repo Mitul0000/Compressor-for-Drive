@@ -9,11 +9,10 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import androidx.annotation.OptIn
 import androidx.exifinterface.media.ExifInterface
+import androidx.media3.common.Effect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
-import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.Presentation
 import androidx.media3.transformer.Composition
 import androidx.media3.transformer.DefaultEncoderFactory
@@ -34,6 +33,7 @@ import java.io.File
 import java.io.FileOutputStream
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.math.roundToInt
 
 enum class CompressionLevel(
     val jpegQuality: Int,
@@ -58,7 +58,6 @@ sealed interface CompressionOutcome {
 
     data class Skipped(val reason: String) : CompressionOutcome
 }
-
 
 class Compressor(context: Context) {
 
@@ -99,7 +98,6 @@ class Compressor(context: Context) {
         val newName = if (isPng) fileName.substringBeforeLast('.', fileName) + ".jpg" else fileName
         val out = File(workDir, "out_${System.nanoTime()}.jpg")
 
-        // Decoded WITHOUT rotating: the EXIF orientation is copied across instead.
         var bitmap = BitmapFactory.decodeFile(input.absolutePath)
             ?: return@withContext CompressionOutcome.Skipped("Could not decode image")
         try {
@@ -121,7 +119,7 @@ class Compressor(context: Context) {
                         out, newName, "image/jpeg", originalSize, newSize, score
                     )
                 }
-                if (attempt == 0) quality = minOf(quality + 5, 95)   // one retry at higher quality
+                if (attempt == 0) quality = minOf(quality + 5, 95)
             }
             out.delete()
             CompressionOutcome.Skipped("Quality check failed")
@@ -149,7 +147,6 @@ class Compressor(context: Context) {
         } catch (_: Exception) {
         }
     }
-
 
     private suspend fun compressVideo(
         input: File,
@@ -208,7 +205,6 @@ class Compressor(context: Context) {
         }
     }
 
-    @OptIn(UnstableApi::class)
     private suspend fun runTransformer(
         input: File,
         output: File,
@@ -217,15 +213,16 @@ class Compressor(context: Context) {
         level: CompressionLevel,
         onProgress: (Float) -> Unit,
     ) = withContext(Dispatchers.Main) {
-        val videoEffects = buildList {
+        val videoEffects = buildList<Effect> {
             val cap = level.videoShortSideCap
-            if (cap != null) {
-                if (info.height <= info.width && info.height > cap) {
-                    add(Presentation.createForHeight(cap))
-                } else if (info.width < info.height && info.width > cap) {
-                    val targetHeight = ((info.height.toFloat() / info.width * cap).toInt() / 2) * 2
-                    add(Presentation.createForHeight(targetHeight))
+            if (cap != null && minOf(info.width, info.height) > cap) {
+                val targetHeight = if (info.height <= info.width) {
+                    cap
+                } else {
+                    val scaled = (info.height.toFloat() * cap / info.width).roundToInt()
+                    scaled - (scaled % 2)
                 }
+                add(Presentation.createForHeight(targetHeight))
             }
         }
         val edited = EditedMediaItem.Builder(MediaItem.fromUri(Uri.fromFile(input)))
@@ -249,9 +246,9 @@ class Compressor(context: Context) {
                 }
             }
             try {
-                suspendCancellableCoroutine<Unit> {cont ->
+                suspendCancellableCoroutine<Unit> { cont ->
                     val t = Transformer.Builder(appContext)
-                        .setVideoMimeType(MimeTypes.VIDEO_H264)   // H.264 so Drive previews keep working
+                        .setVideoMimeType(MimeTypes.VIDEO_H264)
                         .setEncoderFactory(encoderFactory)
                         .addListener(object : Transformer.Listener {
                             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
@@ -280,6 +277,7 @@ class Compressor(context: Context) {
     }
 
     private companion object {
+        const val MIN_IMAGE_BYTES = 100_000L
         const val MAX_PIXELS = 50_000_000L
         const val MIN_SAVING = 0.10
         const val MIN_VIDEO_BITRATE = 2_000_000

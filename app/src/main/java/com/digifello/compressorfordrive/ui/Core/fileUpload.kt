@@ -3,12 +3,12 @@ package com.digifello.compressorfordrive.ui.Core
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -54,7 +54,6 @@ class DriveUploader(
         )
     }
 
-
     suspend fun deleteOldRevisions(fileId: String): Int = withContext(Dispatchers.IO) {
         val revisions = mutableListOf<Pair<String, String>>()
         var pageToken: String? = null
@@ -84,13 +83,20 @@ class DriveUploader(
                 call(Request.Builder().url("$API/files/$fileId/revisions/$id").delete()).close()
                 deleted++
             } catch (_: DriveApiException) {
-                // Some revisions cannot be deleted. Keep going with the rest.
             }
         }
         deleted
     }
 
-
+    suspend fun setState(fileId: String, state: String) = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("appProperties", JSONObject().put(DriveApi.PROP_COMPRESSED, state))
+            .toString()
+        call(
+            Request.Builder().url("$API/files/$fileId")
+                .patch(body.toRequestBody("application/json; charset=UTF-8".toMediaType()))
+        ).close()
+    }
 
     private suspend fun startSession(fileId: String, total: Long, name: String, mime: String): String {
         val url = "$UPLOAD/files/$fileId".toHttpUrl().newBuilder()
@@ -100,7 +106,7 @@ class DriveUploader(
         val metadata = JSONObject()
             .put("name", name)
             .put("mimeType", mime)
-            .put("appProperties", JSONObject().put(DriveApi.PROP_COMPRESSED, "1"))
+            .put("appProperties", JSONObject().put(DriveApi.PROP_COMPRESSED, DriveApi.STATE_PENDING))
             .toString()
         val builder = Request.Builder().url(url)
             .patch(metadata.toRequestBody("application/json; charset=UTF-8".toMediaType()))
@@ -183,7 +189,6 @@ class DriveUploader(
 
     private fun nextOffset(r: Response): Long =
         r.header("Range")?.substringAfter("-")?.toLongOrNull()?.plus(1) ?: 0L
-
 
     private suspend fun call(builder: Request.Builder): Response {
         val base = builder.build()

@@ -66,7 +66,6 @@ fun HomeScreen(vm: HomeViewModel) {
         ActivityResultContracts.StartIntentSenderForResult()
     ) { vm.onConsentResult(it.data) }
 
-    // The background notification needs this permission on Android 13+. The job runs either way.
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { vm.startCompression() }
@@ -146,7 +145,6 @@ private fun HomeContent(
         }
     }
 }
-
 
 @Composable
 private fun AccountSection(state: HomeUiState, onConnect: () -> Unit, onChange: () -> Unit) {
@@ -370,7 +368,6 @@ private fun ResultRow(label: String, value: String) {
     }
 }
 
-
 @Composable
 private fun Section(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -416,7 +413,6 @@ private fun formatBytes(bytes: Long): String {
     } while (value >= 1024 && i < units.lastIndex)
     return "%.1f %s".format(value, units[i])
 }
-
 
 private val sampleQuota = DriveQuota(limit = 15L shl 30, usage = 12_400L shl 20, usageInDrive = 9L shl 30, usageInTrash = 600L shl 20)
 private val sampleScan = ScanResult(KindSummary(840, 5L shl 30), KindSummary(60, 4L shl 30), KindSummary(340, 2L shl 30))

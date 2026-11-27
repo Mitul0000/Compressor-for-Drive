@@ -18,11 +18,6 @@ import com.digifello.compressorfordrive.MainActivity
 import kotlinx.coroutines.CancellationException
 import java.io.File
 
-/**
- * Runs the whole job in the background as a foreground service, so it keeps going
- * when the app is minimized. One file at a time:
- * download, compress, quality check, upload, verify, delete old versions.
- */
 class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     private enum class Kind { COMPRESSED, SKIPPED, FAILED }
@@ -39,7 +34,7 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
             .getOrDefault(CompressionLevel.BALANCED)
         val before = inputData.getLong(KEY_BEFORE, 0L)
 
-        try { setForeground(foregroundInfo(0, 0)) } catch (_: Exception) { /* still runs without it */ }
+        try { setForeground(foregroundInfo(0, 0)) } catch (_: Exception) { }
 
         val connect = ConnectDrive(applicationContext)
         val tokens: suspend () -> String = { connect.accessToken() }
@@ -48,21 +43,33 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
         val compressor = Compressor(applicationContext)
 
         val workDir = File(applicationContext.cacheDir, "compress").apply {
-            deleteRecursively()   // leftovers from an interrupted run
+            deleteRecursively()
             mkdirs()
         }
 
-        val candidates = try {
-            api.listFiles().filter { it.isCandidate() }.sortedByDescending { it.size } // biggest first
+        val allFiles = try {
+            api.listFiles()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             return Result.failure(output(0, before, e.message ?: "Could not read Drive"))
         }
+        val candidates = allFiles.filter { it.isCandidate() }.sortedByDescending { it.size }
+        val pending = allFiles.filter { it.ownedByMe && it.needsCleanup }
 
         val total = candidates.size
         var consecutiveFailures = 0
         try {
+            for (file in pending) {
+                try {
+                    uploader.deleteOldRevisions(file.id)
+                    uploader.setState(file.id, DriveApi.STATE_DONE)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                }
+            }
+
             for (file in candidates) {
                 report(total, file.name, before)
                 val result = try {
@@ -101,14 +108,26 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
         val input = File(workDir, "in_${file.id}")
         try {
             api.download(file.id, input)
-            if (input.length() != file.size) return FileResult(Kind.FAILED)   // incomplete download
+            if (input.length() != file.size) return FileResult(Kind.FAILED)
 
             when (val outcome = compressor.compress(input, file.name, file.mimeType, level, workDir)) {
                 is CompressionOutcome.Skipped -> return FileResult(Kind.SKIPPED)
                 is CompressionOutcome.Success -> try {
-                    val upload = uploader.replaceFile(file.id, outcome.file, outcome.newName, outcome.mimeType)
-                    // Only after the upload is verified is the old version removed.
+                    val upload = try {
+                        uploader.replaceFile(file.id, outcome.file, outcome.newName, outcome.mimeType)
+                    } catch (e: UploadVerificationException) {
+                        uploader.setState(file.id, DriveApi.STATE_FAILED)
+                        throw e
+                    }
+
                     uploader.deleteOldRevisions(file.id)
+
+                    try {
+                        uploader.setState(file.id, DriveApi.STATE_DONE)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                    }
                     return FileResult(Kind.COMPRESSED, (file.size - upload.size).coerceAtLeast(0))
                 } finally {
                     outcome.file.delete()
@@ -130,8 +149,6 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
             KEY_COMPRESSED to compressed, KEY_SKIPPED to skipped, KEY_FAILED to failed,
             KEY_SAVED to saved, KEY_BEFORE to before, KEY_ERROR to (error ?: ""),
         )
-
-    // ------------------------------------------------------------ Notification
 
     private fun foregroundInfo(done: Int, total: Int): ForegroundInfo {
         val ctx = applicationContext

@@ -24,7 +24,6 @@ sealed interface DriveAuthState {
     data class Connected(val email: String?, val accessToken: String) : DriveAuthState
 }
 
-
 class ConnectDrive(context: Context) {
 
     private val appContext = context.applicationContext
@@ -53,7 +52,6 @@ class ConnectDrive(context: Context) {
         return result.toConnected()
     }
 
-
     suspend fun accessToken(): String {
         return when (val state = authorize()) {
             is DriveAuthState.Connected -> state.accessToken
@@ -73,7 +71,6 @@ class ConnectDrive(context: Context) {
                     .build()
                 client.revokeAccess(revoke).await()
             } catch (_: Exception) {
-                // Ignore: local state is already cleared, the next connect asks again.
             }
         }
     }

@@ -14,7 +14,6 @@ import com.digifello.compressorfordrive.ui.Screens.Splash.SplashScreen
 @Composable
 fun AppNavGraph() {
     val navController = rememberNavController()
-    // Created here so the splash and the home screen share one ViewModel (and one login check).
     val vm: HomeViewModel = viewModel()
     val state by vm.state.collectAsStateWithLifecycle()
 

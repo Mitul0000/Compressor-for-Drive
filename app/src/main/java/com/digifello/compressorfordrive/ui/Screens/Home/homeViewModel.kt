@@ -87,7 +87,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
 
     private val _consentRequests = MutableSharedFlow<PendingIntent>(extraBufferCapacity = 1)
-    /** The screen launches these (Google's consent screen needs an Activity). */
     val consentRequests: SharedFlow<PendingIntent> = _consentRequests.asSharedFlow()
 
     private var workJob: Job? = null
@@ -103,8 +102,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(ready = true) }
         }
     }
-
-    // ------------------------------------------------------------ Account
 
     fun connect() {
         viewModelScope.launch {
@@ -160,11 +157,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // ------------------------------------------------------------ Settings
-
     fun setLevel(level: CompressionLevel) {
         prefs.edit().putString("level", level.name).apply()
-        _state.update { it.copy(level = level) }   // the estimate recomputes from this
+        _state.update { it.copy(level = level) }
     }
 
     fun setWifiOnly(value: Boolean) {
@@ -176,8 +171,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putBoolean("chargingOnly", value).apply()
         _state.update { it.copy(chargingOnly = value) }
     }
-
-    // ------------------------------------------------------------ Scan
 
     fun scan() {
         viewModelScope.launch {
@@ -194,8 +187,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
     }
-
-    // ------------------------------------------------------------ Compression
 
     fun startCompression() {
         val s = _state.value
@@ -221,7 +212,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         workManager.cancelUniqueWork(CompressionWorker.WORK_NAME)
     }
 
-    /** Follows the background job, including a run that started before the app was reopened. */
     private fun observeWork() {
         if (workJob?.isActive == true) return
         workJob = viewModelScope.launch {

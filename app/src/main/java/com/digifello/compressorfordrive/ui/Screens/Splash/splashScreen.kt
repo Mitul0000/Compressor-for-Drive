@@ -16,7 +16,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
-/** Shown only while the app checks whether a Google account is already connected. */
 @Composable
 fun SplashScreen(ready: Boolean, onReady: () -> Unit) {
     val currentOnReady by rememberUpdatedState(onReady)

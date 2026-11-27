@@ -43,7 +43,7 @@ private val DarkColors = darkColorScheme(
 @Composable
 fun CompressorForDriveTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
-    @Suppress("UNUSED_PARAMETER") dynamicColor: Boolean = false, // kept off: one fixed, plain palette
+    @Suppress("UNUSED_PARAMETER") dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     MaterialTheme(

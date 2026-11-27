@@ -2,7 +2,6 @@ package com.digifello.compressorfordrive.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// One muted blue accent on neutral greys.
 val LightPrimary = Color(0xFF2F6690)
 val LightOnPrimary = Color(0xFFFFFFFF)
 val LightPrimaryContainer = Color(0xFFD3E4F5)
