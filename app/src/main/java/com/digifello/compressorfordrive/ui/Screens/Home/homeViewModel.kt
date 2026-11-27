@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 enum class Phase { Disconnected, Connected, Scanning, Scanned, Running, Done }
 
@@ -73,7 +74,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
     private val connect = ConnectDrive(app)
-    private val api = DriveApi({ connect.accessToken() })
+    private val api = DriveApi({ force -> connect.accessToken(force) })
     private val workManager = WorkManager.getInstance(app)
 
     private val _state = MutableStateFlow(
@@ -90,6 +91,12 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     val consentRequests: SharedFlow<PendingIntent> = _consentRequests.asSharedFlow()
 
     private var workJob: Job? = null
+
+    /**
+     * The run this screen is tracking. WorkManager keeps the last finished job around, so without
+     * this a finished job from an earlier session would show up as a fresh "Done" result on launch.
+     */
+    private var currentRunId: UUID? = null
 
     init {
         viewModelScope.launch {
@@ -203,6 +210,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             )
             .setConstraints(constraints)
             .build()
+        currentRunId = request.id
         workManager.enqueueUniqueWork(CompressionWorker.WORK_NAME, ExistingWorkPolicy.KEEP, request)
         _state.update { it.copy(phase = Phase.Running, progress = null, result = null, error = null) }
         observeWork()
@@ -218,14 +226,27 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             workManager.getWorkInfosForUniqueWorkFlow(CompressionWorker.WORK_NAME).collect { infos ->
                 val info = infos.firstOrNull() ?: return@collect
                 when (info.state) {
-                    WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED ->
+                    WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED -> {
+                        // Also covers a run still going after the app process was restarted.
+                        currentRunId = info.id
                         _state.update { it.copy(phase = Phase.Running, progress = info.progress.toProgress()) }
+                    }
 
-                    WorkInfo.State.SUCCEEDED -> finishRun(info.outputData, null)
-                    WorkInfo.State.FAILED -> finishRun(info.outputData, info.outputData.getString(CompressionWorker.KEY_ERROR))
+                    WorkInfo.State.SUCCEEDED,
+                    WorkInfo.State.FAILED,
                     WorkInfo.State.CANCELLED -> {
-                        val last = _state.value.progress
-                        finishRun(last?.toData() ?: Data.EMPTY, "Stopped. Files already processed stay compressed.")
+                        // A finished job we are not tracking is an old one: ignore it.
+                        if (info.id != currentRunId) return@collect
+                        currentRunId = null
+                        when (info.state) {
+                            WorkInfo.State.SUCCEEDED -> finishRun(info.outputData, null)
+                            WorkInfo.State.FAILED ->
+                                finishRun(info.outputData, info.outputData.getString(CompressionWorker.KEY_ERROR))
+                            else -> {
+                                val last = _state.value.progress
+                                finishRun(last?.toData() ?: Data.EMPTY, "Stopped. Files already processed stay compressed.")
+                            }
+                        }
                     }
                 }
             }

@@ -4,13 +4,16 @@ import android.accounts.Account
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import com.google.android.gms.auth.GoogleAuthUtil
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.AuthorizationResult
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.auth.api.identity.RevokeAccessRequest
 import com.google.android.gms.common.api.Scope
 import com.google.android.gms.tasks.Task
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -29,6 +32,9 @@ class ConnectDrive(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("drive_connect", Context.MODE_PRIVATE)
     private val client = Identity.getAuthorizationClient(appContext)
+
+    @Volatile
+    private var lastToken: String? = null
 
     private val request: AuthorizationRequest = AuthorizationRequest.builder()
         .setRequestedScopes(listOf(Scope(DRIVE_SCOPE)))
@@ -52,7 +58,12 @@ class ConnectDrive(context: Context) {
         return result.toConnected()
     }
 
-    suspend fun accessToken(): String {
+    /**
+     * @param forceRefresh set after a 401: the cached (expired) token is cleared first so a new
+     * one is issued instead of the same stale token coming back.
+     */
+    suspend fun accessToken(forceRefresh: Boolean = false): String {
+        if (forceRefresh) clearCachedToken()
         return when (val state = authorize()) {
             is DriveAuthState.Connected -> state.accessToken
             is DriveAuthState.NeedsConsent -> error("Drive access was revoked. Reconnect from the app.")
@@ -63,6 +74,7 @@ class ConnectDrive(context: Context) {
     suspend fun disconnect() {
         val email = savedEmail
         prefs.edit().remove(KEY_EMAIL).apply()
+        lastToken = null
         if (email != null) {
             try {
                 val revoke = RevokeAccessRequest.builder()
@@ -70,6 +82,17 @@ class ConnectDrive(context: Context) {
                     .setScopes(listOf(Scope(DRIVE_SCOPE)))
                     .build()
                 client.revokeAccess(revoke).await()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private suspend fun clearCachedToken() {
+        val token = lastToken ?: return
+        lastToken = null
+        withContext(Dispatchers.IO) {
+            try {
+                GoogleAuthUtil.clearToken(appContext, token)
             } catch (_: Exception) {
             }
         }
@@ -86,6 +109,7 @@ class ConnectDrive(context: Context) {
 
     private fun AuthorizationResult.toConnected(): DriveAuthState.Connected {
         val token = accessToken ?: error("No access token returned")
+        lastToken = token
         val email = toGoogleSignInAccount()?.email ?: savedEmail
         if (email != null) prefs.edit().putString(KEY_EMAIL, email).apply()
         return DriveAuthState.Connected(email, token)

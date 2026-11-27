@@ -3,10 +3,10 @@ package com.digifello.compressorfordrive.ui.Core
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
+import android.media.MediaFormat
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import androidx.exifinterface.media.ExifInterface
@@ -85,7 +85,13 @@ class Compressor(context: Context) {
         workDir: File,
     ): CompressionOutcome = withContext(Dispatchers.Default) {
         val originalSize = input.length()
+        // MIN_IMAGE_BYTES is the single top-level constant in scanResult.kt
         if (originalSize < MIN_IMAGE_BYTES) return@withContext CompressionOutcome.Skipped("Already small")
+
+        val isPng = mimeType == "image/png"
+        if (!isPng && hasUnsupportedExtras(input)) {
+            return@withContext CompressionOutcome.Skipped("Has HDR or Motion Photo data")
+        }
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(input.absolutePath, bounds)
@@ -94,14 +100,20 @@ class Compressor(context: Context) {
             return@withContext CompressionOutcome.Skipped("Image too large to process safely")
         }
 
-        val isPng = mimeType == "image/png"
         val newName = if (isPng) fileName.substringBeforeLast('.', fileName) + ".jpg" else fileName
         val out = File(workDir, "out_${System.nanoTime()}.jpg")
 
-        var bitmap = BitmapFactory.decodeFile(input.absolutePath)
+        val bitmap = BitmapFactory.decodeFile(input.absolutePath)
             ?: return@withContext CompressionOutcome.Skipped("Could not decode image")
         try {
-            if (isPng || bitmap.hasAlpha()) bitmap = flattenOnWhite(bitmap)
+            // JPEG cannot hold transparency; never flatten the user's transparent PNGs.
+            if (bitmap.hasAlpha()) return@withContext CompressionOutcome.Skipped("Has transparency")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && bitmap.colorSpace?.isSrgb == false) {
+                return@withContext CompressionOutcome.Skipped("Wide colour profile")
+            }
+
+            // PNGs are often screenshots/text, where lossy artefacts show more: be stricter.
+            val threshold = if (isPng) minOf(0.99, level.ssimThreshold + 0.02) else level.ssimThreshold
 
             var quality = level.jpegQuality
             repeat(2) { attempt ->
@@ -114,7 +126,7 @@ class Compressor(context: Context) {
                     return@withContext CompressionOutcome.Skipped("Not enough saving")
                 }
                 val score = SimilarityCheck.imageSimilarity(input, out)
-                if (score >= level.ssimThreshold) {
+                if (score >= threshold) {
                     return@withContext CompressionOutcome.Success(
                         out, newName, "image/jpeg", originalSize, newSize, score
                     )
@@ -128,14 +140,16 @@ class Compressor(context: Context) {
         }
     }
 
-    private fun flattenOnWhite(src: Bitmap): Bitmap {
-        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-        Canvas(out).apply {
-            drawColor(Color.WHITE)
-            drawBitmap(src, 0f, 0f, null)
+    /** Motion Photos and Ultra HDR gain maps live in extra data a re-encode would silently drop. */
+    private fun hasUnsupportedExtras(file: File): Boolean = try {
+        val buffer = ByteArray(HEADER_SCAN_BYTES)
+        val n = file.inputStream().use { it.read(buffer) }
+        if (n <= 0) false else {
+            val head = String(buffer, 0, n, Charsets.ISO_8859_1)
+            EXTRA_MARKERS.any { head.contains(it) }
         }
-        src.recycle()
-        return out
+    } catch (_: Exception) {
+        false
     }
 
     private fun copyExif(from: File, to: File) {
@@ -158,6 +172,7 @@ class Compressor(context: Context) {
     ): CompressionOutcome {
         val originalSize = input.length()
         val info = readVideoInfo(input) ?: return CompressionOutcome.Skipped("Could not read video")
+        if (info.hdr) return CompressionOutcome.Skipped("HDR video")
         if (info.bitrate in 1 until MIN_VIDEO_BITRATE) return CompressionOutcome.Skipped("Already low bitrate")
 
         val targetBitrate = (info.bitrate * level.videoBitrateFactor).toInt()
@@ -186,7 +201,7 @@ class Compressor(context: Context) {
         return CompressionOutcome.Success(out, name, "video/mp4", originalSize, newSize, check.similarity)
     }
 
-    private class VideoInfo(val bitrate: Int, val width: Int, val height: Int)
+    private class VideoInfo(val bitrate: Int, val width: Int, val height: Int, val hdr: Boolean)
 
     private suspend fun readVideoInfo(file: File): VideoInfo? = withContext(Dispatchers.IO) {
         val r = MediaMetadataRetriever()
@@ -197,7 +212,11 @@ class Compressor(context: Context) {
             var h = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: return@withContext null
             val rotation = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
             if (rotation == 90 || rotation == 270) { val t = w; w = h; h = t }
-            VideoInfo(bitrate, w, h)
+            val hdr = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && run {
+                val transfer = r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_COLOR_TRANSFER)?.toIntOrNull()
+                transfer == MediaFormat.COLOR_TRANSFER_ST2084 || transfer == MediaFormat.COLOR_TRANSFER_HLG
+            }
+            VideoInfo(bitrate, w, h, hdr)
         } catch (_: Exception) {
             null
         } finally {
@@ -277,11 +296,13 @@ class Compressor(context: Context) {
     }
 
     private companion object {
-        const val MIN_IMAGE_BYTES = 100_000L
         const val MAX_PIXELS = 50_000_000L
         const val MIN_SAVING = 0.10
         const val MIN_VIDEO_BITRATE = 2_000_000
         const val MIN_TARGET_BITRATE = 1_000_000
+        const val HEADER_SCAN_BYTES = 256 * 1024
+
+        val EXTRA_MARKERS = listOf("MotionPhoto", "MicroVideo", "hdrgm", "GainMap")
 
         val EXIF_TAGS = listOf(
             ExifInterface.TAG_DATETIME, ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED,

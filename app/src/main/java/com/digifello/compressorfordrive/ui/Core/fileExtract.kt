@@ -10,6 +10,7 @@ import okhttp3.Response
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 data class DriveQuota(
@@ -31,6 +32,8 @@ data class DriveFile(
     val shared: Boolean,
     val modifiedTime: String?,
     val compressState: String?,
+    /** md5 the live file must have after our upload; stored on the file while it is "pending". */
+    val expectedMd5: String? = null,
 ) {
     val alreadyCompressed: Boolean get() = compressState != null
 
@@ -45,6 +48,8 @@ data class DriveFile(
         }
 }
 
+data class DriveFileState(val md5: String?, val headRevisionId: String?)
+
 data class KindSummary(val count: Int, val bytes: Long)
 
 fun List<DriveFile>.summarize(): Map<FileKind, KindSummary> =
@@ -52,8 +57,34 @@ fun List<DriveFile>.summarize(): Map<FileKind, KindSummary> =
 
 class DriveApiException(val code: Int, message: String) : IOException(message)
 
+internal fun File.md5Hex(): String {
+    val digest = MessageDigest.getInstance("MD5")
+    inputStream().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            digest.update(buffer, 0, n)
+        }
+    }
+    return digest.digest().joinToString("") { "%02x".format(it) }
+}
+
+/** Short, user-safe message instead of dumping the whole API response body. */
+internal fun driveErrorMessage(code: Int, body: String): String {
+    val detail = try {
+        JSONObject(body).getJSONObject("error").optString("message")
+    } catch (_: Exception) {
+        ""
+    }
+    return if (detail.isNotEmpty()) "Drive error $code: ${detail.take(200)}" else "Drive error $code"
+}
+
+/**
+ * [tokenProvider] gets `true` when the previous token was rejected (401) and must be refreshed.
+ */
 class DriveApi(
-    private val tokenProvider: suspend () -> String,
+    private val tokenProvider: suspend (forceRefresh: Boolean) -> String,
     private val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
@@ -92,6 +123,7 @@ class DriveApi(
                 for (i in 0 until files.length()) {
                     val f = files.getJSONObject(i)
                     val size = f.optString("size").toLongOrNull() ?: continue
+                    val props = f.optJSONObject("appProperties")
                     all += DriveFile(
                         id = f.getString("id"),
                         name = f.optString("name"),
@@ -101,9 +133,8 @@ class DriveApi(
                         ownedByMe = f.optBoolean("ownedByMe", false),
                         shared = f.optBoolean("shared", false),
                         modifiedTime = f.optString("modifiedTime").ifEmpty { null },
-                        compressState = f.optJSONObject("appProperties")
-                            ?.optString(PROP_COMPRESSED)
-                            ?.ifEmpty { null },
+                        compressState = props?.optString(PROP_COMPRESSED)?.ifEmpty { null },
+                        expectedMd5 = props?.optString(PROP_EXPECTED_MD5)?.ifEmpty { null },
                     )
                 }
             }
@@ -140,15 +171,16 @@ class DriveApi(
     }
 
     private suspend fun execute(url: HttpUrl): Response {
-        var response = http.newCall(request(url, tokenProvider())).execute()
+        var response = http.newCall(request(url, tokenProvider(false))).execute()
         if (response.code == 401) {
             response.close()
-            response = http.newCall(request(url, tokenProvider())).execute()
+            response = http.newCall(request(url, tokenProvider(true))).execute()
         }
         if (!response.isSuccessful) {
             val message = response.body?.string().orEmpty()
+            val code = response.code
             response.close()
-            throw DriveApiException(response.code, "Drive API ${response.code}: $message")
+            throw DriveApiException(code, driveErrorMessage(code, message))
         }
         return response
     }
@@ -160,6 +192,9 @@ class DriveApi(
         private const val BASE = "https://www.googleapis.com/drive/v3"
 
         const val PROP_COMPRESSED = "compressedByApp"
+
+        /** md5 the file must have once our upload finished; checked before old revisions are deleted. */
+        const val PROP_EXPECTED_MD5 = "expectedMd5"
 
         const val STATE_PENDING = "pending"
 
