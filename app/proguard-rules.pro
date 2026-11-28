@@ -1,6 +1,5 @@
-# Keep line numbers so release crash stack traces are readable.
--keepattributes SourceFile,LineNumberTable
--renamesourcefileattribute SourceFile
-
-# OkHttp, WorkManager, Media3 and Play services ship their own consumer rules.
-# org.json is part of Android, so nothing else is needed here.
+-keep class * extends androidx.room.RoomDatabase { <init>(); }
+-keep class androidx.work.impl.WorkDatabase_Impl { *; }
+-keep class * extends androidx.work.ListenableWorker {
+    <init>(android.content.Context, androidx.work.WorkerParameters);
+}
