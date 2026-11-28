@@ -362,10 +362,7 @@ private fun VideoPreview(file: File) {
 
         if (failed) {
             Text("Cannot preview this video")
-            return@key
-        }
-
-        Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+        } else Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 val ratioModifier = videoRatio?.let { Modifier.aspectRatio(it) } ?: Modifier.fillMaxSize()
                 AndroidView(
@@ -389,10 +386,11 @@ private fun VideoPreview(file: File) {
                                 override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
                             }
                             setOnClickListener {
-                                val mp = player ?: return@setOnClickListener
-                                if (!prepared) return@setOnClickListener
-                                if (playing) mp.pause() else mp.start()
-                                playing = !playing
+                                val mp = player
+                                if (mp != null && prepared) {
+                                    if (playing) mp.pause() else mp.start()
+                                    playing = !playing
+                                }
                             }
                         }
                     },
@@ -405,9 +403,11 @@ private fun VideoPreview(file: File) {
                 TextButton(
                     enabled = prepared,
                     onClick = {
-                        val mp = player ?: return@TextButton
-                        if (playing) mp.pause() else mp.start()
-                        playing = !playing
+                        val mp = player
+                        if (mp != null) {
+                            if (playing) mp.pause() else mp.start()
+                            playing = !playing
+                        }
                     },
                 ) { Text(if (playing) "Pause" else "Play") }
                 Slider(

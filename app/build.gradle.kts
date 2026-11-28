@@ -19,9 +19,7 @@ val hasReleaseKey = keystoreProps.getProperty("storeFile") != null
 android {
     namespace = "com.digifello.compressorfordrive"
     compileSdk {
-        version = release(37) {
-            minorApiLevel = 1
-        }
+        version = release(37)
     }
 
     defaultConfig {
