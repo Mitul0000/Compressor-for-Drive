@@ -16,7 +16,6 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.digifello.compressorfordrive.ui.Core.AppSettings
-import com.digifello.compressorfordrive.ui.Core.AutoCheckWorker
 import com.digifello.compressorfordrive.ui.Core.CompressionLevel
 import com.digifello.compressorfordrive.ui.Core.CompressionWorker
 import com.digifello.compressorfordrive.ui.Core.DeviceStorage
@@ -27,7 +26,6 @@ import com.digifello.compressorfordrive.ui.Core.MediaAccess
 import com.digifello.compressorfordrive.ui.Core.ProcessedStore
 import com.digifello.compressorfordrive.ui.Core.QueueFile
 import com.digifello.compressorfordrive.ui.Core.ScanResult
-import com.digifello.compressorfordrive.ui.Core.Scope
 import com.digifello.compressorfordrive.ui.Core.classify
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers

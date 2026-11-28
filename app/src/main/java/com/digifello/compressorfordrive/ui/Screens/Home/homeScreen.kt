@@ -60,7 +60,6 @@ import com.digifello.compressorfordrive.ui.Core.KindSummary
 import com.digifello.compressorfordrive.ui.Core.MAX_FILES_PER_RUN
 import com.digifello.compressorfordrive.ui.Core.MediaAccess
 import com.digifello.compressorfordrive.ui.Core.ScanResult
-import com.digifello.compressorfordrive.ui.Core.Scope
 import com.digifello.compressorfordrive.ui.Core.estimatedSavedBytes
 import com.digifello.compressorfordrive.ui.theme.CompressorForDriveTheme
 import java.text.DateFormat
@@ -224,7 +223,6 @@ private fun StorageSection(state: HomeUiState) {
 }
 
 @Composable
-@Composable
 private fun QualitySection(state: HomeUiState, onLevel: (CompressionLevel) -> Unit) {
     Section("Compression quality") {
         LevelPicker(state.level, state.phase != Phase.Running, onLevel)
@@ -285,20 +283,6 @@ private fun OptionsSection(state: HomeUiState, actions: Actions) {
         Column(modifier = Modifier.alpha(if (enabled) 1f else 0.5f)) {
             CheckOption("Only while charging", state.chargingOnly, enabled, actions.onChargingOnly)
         }
-    }
-}
-
-@Composable
-private fun ScopeOption(label: String, value: Scope, selected: Scope, enabled: Boolean, onSelect: (Scope) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .selectable(selected = value == selected, enabled = enabled, role = Role.RadioButton) { onSelect(value) }
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioButton(selected = value == selected, onClick = null, enabled = enabled)
-        Text(label, modifier = Modifier.padding(start = 12.dp))
     }
 }
 
