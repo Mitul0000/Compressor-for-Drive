@@ -57,6 +57,15 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
         try {
             for (key in keys) {
                 val media = QueueFile.parse(key)?.let { (isVideo, id) -> scanner.get(isVideo, id) }
+
+                // Already handled by an earlier attempt of this job (for example the phone stopped the job
+                // when the app was closed and it restarted): carry on from where it stopped, do not redo it.
+                if (media != null && !store.shouldProcess(media, level)) {
+                    done++
+                    if (done % 20 == 0) report(total, "", before)
+                    continue
+                }
+
                 report(total, media?.name.orEmpty(), before)
 
                 val result = if (media == null) {

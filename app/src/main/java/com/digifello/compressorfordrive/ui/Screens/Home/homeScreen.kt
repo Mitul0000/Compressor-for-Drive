@@ -102,7 +102,6 @@ fun HomeScreen(vm: HomeViewModel) {
         actions = Actions(
             onGrantAccess = { permissionLauncher.launch(MediaAccess.permissionsToRequest()) },
             onLevel = vm::setLevel,
-            onChargingOnly = vm::setChargingOnly,
             onScan = vm::scan,
             onStart = { confirmStart = true },
             onStop = vm::stop,
@@ -136,7 +135,6 @@ fun HomeScreen(vm: HomeViewModel) {
 private class Actions(
     val onGrantAccess: () -> Unit,
     val onLevel: (CompressionLevel) -> Unit,
-    val onChargingOnly: (Boolean) -> Unit,
     val onScan: () -> Unit,
     val onStart: () -> Unit,
     val onStop: () -> Unit,
@@ -162,7 +160,6 @@ private fun HomeContent(state: HomeUiState, actions: Actions) {
             if (!state.hasAccess) AccessSection(actions.onGrantAccess)
             StorageSection(state)
             QualitySection(state, actions.onLevel)
-            OptionsSection(state, actions)
             ScanSection(state, actions.onScan)
             EstimateSection(state)
             ActionSection(state, actions.onStart, actions.onStop)
@@ -277,30 +274,6 @@ internal fun LevelOption(
 }
 
 @Composable
-private fun OptionsSection(state: HomeUiState, actions: Actions) {
-    val enabled = state.phase != Phase.Running
-    Section("Options") {
-        Column(modifier = Modifier.alpha(if (enabled) 1f else 0.5f)) {
-            CheckOption("Only while charging", state.chargingOnly, enabled, actions.onChargingOnly)
-        }
-    }
-}
-
-@Composable
-private fun CheckOption(label: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .toggleable(value = checked, enabled = enabled, role = Role.Checkbox, onValueChange = onChange)
-            .padding(vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Checkbox(checked = checked, onCheckedChange = null, enabled = enabled)
-        Text(label, modifier = Modifier.padding(start = 12.dp))
-    }
-}
-
-@Composable
 private fun ScanSection(state: HomeUiState, onScan: () -> Unit) {
     val canScan = state.hasAccess && state.phase != Phase.Scanning && state.phase != Phase.Running
     Section("Scan") {
@@ -377,15 +350,19 @@ private fun ActionSection(state: HomeUiState, onStart: () -> Unit, onStop: () ->
             val p = state.progress
             if (p == null || p.total == 0) {
                 Text("Waiting to start...")
-                if (state.chargingOnly) Note("The job starts when the phone is charging.")
             } else {
                 LinearProgressIndicator(progress = { p.done.toFloat() / p.total }, modifier = Modifier.fillMaxWidth())
-                Text("Processing ${p.done} of ${p.total} files")
-                if (p.current.isNotEmpty()) Note(p.current, maxLines = 1)
+                if (state.paused) {
+                    Text("Paused at ${p.done} of ${p.total} files")
+                    Note("The battery is low. It carries on from where it stopped when the battery recovers.")
+                } else {
+                    Text("Processing ${p.done} of ${p.total} files")
+                    if (p.current.isNotEmpty()) Note(p.current, maxLines = 1)
+                }
                 Note("Freed so far: ${formatBytes(p.savedBytes)}")
             }
             TextButton(onClick = onStop) { Text("Stop") }
-            Note("Runs in the background. You can close the app.")
+            Note("Keep the app in the background. Do not remove it from recent apps or force stop it, or the compression will stop.")
         }
     }
 }

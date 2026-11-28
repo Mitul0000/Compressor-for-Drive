@@ -76,7 +76,9 @@ class Compressor(context: Context) {
         workDir: File,
         onProgress: (Float) -> Unit = {},
     ): CompressionOutcome = when {
-        mimeType == "image/jpeg" -> compressImage(input, fileName, level, workDir)
+        mimeType == "image/jpeg" ->
+            if (isAlreadyCompressed(input, level)) CompressionOutcome.Skipped("Already compressed")
+            else compressImage(input, fileName, level, workDir)
         mimeType == "image/png" -> compressPng(input, fileName, workDir)
         mimeType.startsWith("video/") -> compressVideo(input, fileName, level, workDir, onProgress)
         else -> CompressionOutcome.Skipped("File type not supported")
@@ -162,7 +164,7 @@ class Compressor(context: Context) {
             var quality = level.jpegQuality
             repeat(2) { attempt ->
                 FileOutputStream(out).use { bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it) }
-                copyExif(input, out)
+                copyExif(input, out, level)
 
                 val newSize = out.length()
                 if (newSize >= originalSize) {
@@ -196,11 +198,27 @@ class Compressor(context: Context) {
         false
     }
 
-    private fun copyExif(from: File, to: File) {
+    /**
+     * True when this photo carries our marker from an earlier run at the same or a stronger level.
+     * The marker lives inside the file, so it still works after reinstalling the app or moving the photo.
+     */
+    private fun isAlreadyCompressed(file: File, level: CompressionLevel): Boolean = try {
+        val tag = ExifInterface(file.absolutePath).getAttribute(ExifInterface.TAG_SOFTWARE).orEmpty()
+        if (!tag.startsWith(MARKER_PREFIX)) false
+        else {
+            val doneLevel = CompressionLevel.entries.firstOrNull { tag.endsWith("level=${it.name}") }
+            doneLevel != null && doneLevel.ordinal >= level.ordinal
+        }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun copyExif(from: File, to: File, level: CompressionLevel) {
         try {
             val src = ExifInterface(from.absolutePath)
             val dst = ExifInterface(to.absolutePath)
             for (tag in EXIF_TAGS) src.getAttribute(tag)?.let { dst.setAttribute(tag, it) }
+            dst.setAttribute(ExifInterface.TAG_SOFTWARE, "$MARKER_PREFIX/1 level=${level.name}")
             dst.saveAttributes()
         } catch (_: Exception) {
         }
@@ -348,6 +366,8 @@ class Compressor(context: Context) {
 
         val EXTRA_MARKERS = listOf("MotionPhoto", "MicroVideo", "hdrgm", "GainMap")
 
+        const val MARKER_PREFIX = "CompressorForDrive"
+
         val EXIF_TAGS = listOf(
             ExifInterface.TAG_DATETIME, ExifInterface.TAG_DATETIME_ORIGINAL, ExifInterface.TAG_DATETIME_DIGITIZED,
             ExifInterface.TAG_OFFSET_TIME, ExifInterface.TAG_OFFSET_TIME_ORIGINAL, ExifInterface.TAG_OFFSET_TIME_DIGITIZED,
@@ -360,6 +380,21 @@ class Compressor(context: Context) {
             ExifInterface.TAG_EXPOSURE_TIME, ExifInterface.TAG_F_NUMBER,
             ExifInterface.TAG_PHOTOGRAPHIC_SENSITIVITY, ExifInterface.TAG_FOCAL_LENGTH,
             ExifInterface.TAG_FLASH, ExifInterface.TAG_WHITE_BALANCE,
+            ExifInterface.TAG_IMAGE_DESCRIPTION, ExifInterface.TAG_USER_COMMENT,
+            ExifInterface.TAG_ARTIST, ExifInterface.TAG_COPYRIGHT,
+            "LensMake", "LensModel", "LensSpecification", "BodySerialNumber", // plain names: older library versions lack the constants
+            ExifInterface.TAG_IMAGE_UNIQUE_ID,
+            ExifInterface.TAG_EXPOSURE_PROGRAM, ExifInterface.TAG_EXPOSURE_MODE, ExifInterface.TAG_EXPOSURE_BIAS_VALUE,
+            ExifInterface.TAG_METERING_MODE, ExifInterface.TAG_LIGHT_SOURCE, ExifInterface.TAG_SCENE_CAPTURE_TYPE,
+            ExifInterface.TAG_SCENE_TYPE, ExifInterface.TAG_SENSING_METHOD, ExifInterface.TAG_CONTRAST,
+            ExifInterface.TAG_SATURATION, ExifInterface.TAG_SHARPNESS, ExifInterface.TAG_GAIN_CONTROL,
+            ExifInterface.TAG_DIGITAL_ZOOM_RATIO, ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM,
+            ExifInterface.TAG_SUBJECT_DISTANCE, ExifInterface.TAG_SUBJECT_DISTANCE_RANGE,
+            ExifInterface.TAG_BRIGHTNESS_VALUE, ExifInterface.TAG_SHUTTER_SPEED_VALUE, ExifInterface.TAG_APERTURE_VALUE,
+            ExifInterface.TAG_MAX_APERTURE_VALUE, ExifInterface.TAG_ISO_SPEED_RATINGS,
+            ExifInterface.TAG_GPS_PROCESSING_METHOD, ExifInterface.TAG_GPS_IMG_DIRECTION,
+            ExifInterface.TAG_GPS_IMG_DIRECTION_REF, ExifInterface.TAG_GPS_SPEED, ExifInterface.TAG_GPS_SPEED_REF,
+            ExifInterface.TAG_GPS_MAP_DATUM, ExifInterface.TAG_GPS_AREA_INFORMATION,
         )
     }
 }

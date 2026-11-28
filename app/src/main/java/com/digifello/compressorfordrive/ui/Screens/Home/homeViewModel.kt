@@ -68,9 +68,10 @@ data class HomeUiState(
     val phase: Phase = Phase.Idle,
     val storage: DeviceStorage? = null,
     val level: CompressionLevel = CompressionLevel.BALANCED,
-    val chargingOnly: Boolean = false,
     val scan: ScanResult? = null,
     val progress: RunProgress? = null,
+    /** The job was started but the phone paused it (charger unplugged or battery low). */
+    val paused: Boolean = false,
     val result: RunResult? = null,
     val error: String? = null,
 )
@@ -85,7 +86,6 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
             hasAccess = MediaAccess.hasAccess(app),
             storage = DeviceStorage.read(),
             level = settings.level,
-            chargingOnly = settings.chargingOnly,
         )
     )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -124,10 +124,6 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
 
 
 
-    fun setChargingOnly(value: Boolean) {
-        settings.chargingOnly = value
-        _state.update { it.copy(chargingOnly = value) }
-    }
 
 
     /** A different level or scope changes which files qualify, so the old scan no longer applies. */
@@ -185,7 +181,6 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     private fun startCompression() {
-        val s = _state.value
         val items = candidates.take(MAX_FILES_PER_RUN)
         if (items.isEmpty()) return
 
@@ -193,7 +188,6 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
         runUsedBefore = DeviceStorage.read().used
 
         val constraints = Constraints.Builder()
-            .setRequiresCharging(s.chargingOnly)
             .setRequiresBatteryNotLow(true)
             .build()
         val request = OneTimeWorkRequestBuilder<CompressionWorker>()
@@ -202,7 +196,7 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
             .build()
         currentRunId = request.id
         workManager.enqueueUniqueWork(CompressionWorker.WORK_NAME, ExistingWorkPolicy.KEEP, request)
-        _state.update { it.copy(phase = Phase.Running, progress = null, result = null, error = null) }
+        _state.update { it.copy(phase = Phase.Running, progress = null, paused = false, result = null, error = null) }
         observeWork()
     }
 
@@ -219,7 +213,17 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
                     WorkInfo.State.ENQUEUED, WorkInfo.State.RUNNING, WorkInfo.State.BLOCKED -> {
                         // Also covers a run still going after the app process was restarted.
                         currentRunId = info.id
-                        _state.update { it.copy(phase = Phase.Running, progress = info.progress.toProgress()) }
+                        // While paused (job back in the queue) Android clears the progress: keep the last
+                        // numbers on screen and say it is paused, instead of showing 0.
+                        val fresh = info.progress.takeIf { it.keyValueMap.containsKey(CompressionWorker.KEY_TOTAL) }
+                        _state.update {
+                            val last = fresh?.toProgress() ?: it.progress
+                            it.copy(
+                                phase = Phase.Running,
+                                progress = last,
+                                paused = info.state == WorkInfo.State.ENQUEUED && (last?.total ?: 0) > 0,
+                            )
+                        }
                     }
 
                     WorkInfo.State.SUCCEEDED,
@@ -258,6 +262,7 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
             it.copy(
                 phase = Phase.Done,
                 progress = null,
+                paused = false,
                 scan = null,
                 storage = storage,
                 result = result,
