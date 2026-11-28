@@ -2,27 +2,35 @@ package com.digifello.compressorfordrive.ui.Screens.Home
 
 import android.app.Application
 import android.app.PendingIntent
-import android.content.Context
-import android.content.Intent
+import android.os.Build
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.Constraints
 import androidx.work.Data
+import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
+import com.digifello.compressorfordrive.ui.Core.AppSettings
+import com.digifello.compressorfordrive.ui.Core.AutoCheckWorker
 import com.digifello.compressorfordrive.ui.Core.CompressionLevel
 import com.digifello.compressorfordrive.ui.Core.CompressionWorker
-import com.digifello.compressorfordrive.ui.Core.ConnectDrive
-import com.digifello.compressorfordrive.ui.Core.DriveApi
-import com.digifello.compressorfordrive.ui.Core.DriveAuthState
-import com.digifello.compressorfordrive.ui.Core.DriveQuota
+import com.digifello.compressorfordrive.ui.Core.DeviceStorage
+import com.digifello.compressorfordrive.ui.Core.LocalMedia
+import com.digifello.compressorfordrive.ui.Core.LocalScanner
+import com.digifello.compressorfordrive.ui.Core.MAX_FILES_PER_RUN
+import com.digifello.compressorfordrive.ui.Core.MediaAccess
+import com.digifello.compressorfordrive.ui.Core.ProcessedStore
+import com.digifello.compressorfordrive.ui.Core.QueueFile
 import com.digifello.compressorfordrive.ui.Core.ScanResult
-import com.digifello.compressorfordrive.ui.Core.toScanResult
+import com.digifello.compressorfordrive.ui.Core.Scope
+import com.digifello.compressorfordrive.ui.Core.classify
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,9 +40,11 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 
-enum class Phase { Disconnected, Connected, Scanning, Scanned, Running, Done }
+enum class Phase { Idle, Scanning, Scanned, Running, Done }
 
 data class RunProgress(
     val done: Int = 0,
@@ -51,47 +61,50 @@ data class RunResult(
     val skipped: Int,
     val failed: Int,
     val savedBytes: Long,
-    val beforeBytes: Long,
-    val afterBytes: Long?,
+    val usedBefore: Long,
+    val usedAfter: Long,
 )
 
 data class HomeUiState(
-    val ready: Boolean = false,
-    val phase: Phase = Phase.Disconnected,
-    val email: String? = null,
-    val quota: DriveQuota? = null,
+    val hasAccess: Boolean = false,
+    val phase: Phase = Phase.Idle,
+    val storage: DeviceStorage? = null,
     val level: CompressionLevel = CompressionLevel.BALANCED,
-    val wifiOnly: Boolean = true,
+    val scope: Scope = Scope.ALL,
+    val sinceSeconds: Long = 0L,
     val chargingOnly: Boolean = false,
-    val scanCount: Int = 0,
+    val dailyCheck: Boolean = false,
     val scan: ScanResult? = null,
     val progress: RunProgress? = null,
     val result: RunResult? = null,
     val error: String? = null,
 )
 
-class HomeViewModel(app: Application) : AndroidViewModel(app) {
+class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
 
-    private val prefs = app.getSharedPreferences("settings", Context.MODE_PRIVATE)
-    private val connect = ConnectDrive(app)
-    private val api = DriveApi({ force -> connect.accessToken(force) })
+    private val settings = AppSettings(app)
     private val workManager = WorkManager.getInstance(app)
 
     private val _state = MutableStateFlow(
         HomeUiState(
-            level = runCatching { CompressionLevel.valueOf(prefs.getString("level", "")!!) }
-                .getOrDefault(CompressionLevel.BALANCED),
-            wifiOnly = prefs.getBoolean("wifiOnly", true),
-            chargingOnly = prefs.getBoolean("chargingOnly", false),
+            hasAccess = MediaAccess.hasAccess(app),
+            storage = DeviceStorage.read(),
+            level = settings.level,
+            scope = settings.scope,
+            sinceSeconds = settings.sinceSeconds,
+            chargingOnly = settings.chargingOnly,
+            dailyCheck = settings.dailyCheck,
         )
     )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
 
-    private val _consentRequests = MutableSharedFlow<PendingIntent>(extraBufferCapacity = 1)
-    val consentRequests: SharedFlow<PendingIntent> = _consentRequests.asSharedFlow()
-    private val _accountPickerRequests = MutableSharedFlow<Intent>(extraBufferCapacity = 1)
-    val accountPickerRequests: SharedFlow<Intent> = _accountPickerRequests.asSharedFlow()
+    /** Android's "allow this app to edit these files" prompt. */
+    private val _writeRequests = MutableSharedFlow<PendingIntent>(extraBufferCapacity = 1)
+    val writeRequests: SharedFlow<PendingIntent> = _writeRequests.asSharedFlow()
+
+    private var candidates: List<LocalMedia> = emptyList()
     private var workJob: Job? = null
+    private var runUsedBefore = 0L
 
     /**
      * The run this screen is tracking. WorkManager keeps the last finished job around, so without
@@ -100,121 +113,122 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private var currentRunId: UUID? = null
 
     init {
-        viewModelScope.launch {
-            val auth = try {
-                connect.reloadUser()
-            } catch (e: Exception) {
-                DriveAuthState.Disconnected
-            }
-            if (auth is DriveAuthState.Connected) applyConnected(auth)
-            _state.update { it.copy(ready = true) }
-        }
+        observeWork()
     }
 
-    fun connect() {
+    fun refreshAccess() {
+        _state.update { it.copy(hasAccess = MediaAccess.hasAccess(app), storage = DeviceStorage.read()) }
+    }
+
+    // ---- settings -------------------------------------------------------------------------
+
+    fun setLevel(level: CompressionLevel) {
+        settings.level = level
+        _state.update { it.copy(level = level).invalidated() }
+    }
+
+    fun setScope(scope: Scope) {
+        settings.scope = scope
+        var since = settings.sinceSeconds
+        if (scope == Scope.NEW_ONLY && since == 0L) {
+            since = nowSeconds()
+            settings.sinceSeconds = since
+        }
+        _state.update { it.copy(scope = scope, sinceSeconds = since).invalidated() }
+    }
+
+    /** "From now": only files added after this moment count. */
+    fun startFromNow() {
+        val since = nowSeconds()
+        settings.sinceSeconds = since
+        _state.update { it.copy(sinceSeconds = since).invalidated() }
+    }
+
+    fun setChargingOnly(value: Boolean) {
+        settings.chargingOnly = value
+        _state.update { it.copy(chargingOnly = value) }
+    }
+
+    fun setDailyCheck(value: Boolean) {
+        settings.dailyCheck = value
+        if (value) {
+            val request = PeriodicWorkRequestBuilder<AutoCheckWorker>(1, TimeUnit.DAYS).build()
+            workManager.enqueueUniquePeriodicWork(AutoCheckWorker.WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
+        } else {
+            workManager.cancelUniqueWork(AutoCheckWorker.WORK_NAME)
+        }
+        _state.update { it.copy(dailyCheck = value) }
+    }
+
+    /** A different level or scope changes which files qualify, so the old scan no longer applies. */
+    private fun HomeUiState.invalidated() =
+        if (phase == Phase.Scanned || phase == Phase.Done) copy(phase = Phase.Idle, scan = null) else this
+
+    // ---- scan -----------------------------------------------------------------------------
+
+    fun scan() {
+        if (!MediaAccess.hasAccess(app)) {
+            refreshAccess()
+            return
+        }
+        val s = _state.value
         viewModelScope.launch {
+            _state.update { it.copy(phase = Phase.Scanning, scan = null, error = null) }
             try {
-                when (val s = connect.signInWithGoogle()) {
-                    is DriveAuthState.NeedsConsent -> _consentRequests.emit(s.pendingIntent)
-                    is DriveAuthState.Connected -> applyConnected(s)
-                    DriveAuthState.Disconnected -> Unit
+                val outcome = withContext(Dispatchers.IO) {
+                    val since = if (s.scope == Scope.NEW_ONLY) s.sinceSeconds else null
+                    LocalScanner(app).scan(since).classify(ProcessedStore.forApp(app), s.level)
+                }
+                candidates = outcome.candidates
+                _state.update {
+                    it.copy(phase = Phase.Scanned, scan = outcome.summary, storage = DeviceStorage.read(), result = null)
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                fail("Could not connect: ${e.message}")
-            }
-        }
-    }
-
-    fun onConsentResult(data: Intent?) {
-        viewModelScope.launch {
-            try {
-                applyConnected(connect.handleConsentResult(data))
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                fail("Drive access was not granted")
-            }
-        }
-    }
-
-    fun changeAccount() {
-        viewModelScope.launch {
-            workJob?.cancel()
-            connect.disconnect()
-            _state.update { HomeUiState(ready = true, level = it.level, wifiOnly = it.wifiOnly, chargingOnly = it.chargingOnly) }
-            _accountPickerRequests.emit(connect.chooseAccountIntent())
-        }
-    }
-
-    fun onAccountPicked(data: Intent?) {
-        val email = data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME) ?: return
-        connect.selectAccount(email)
-        connect()
-    }
-
-    private suspend fun applyConnected(auth: DriveAuthState.Connected) {
-        _state.update { it.copy(email = auth.email, phase = Phase.Connected, error = null) }
-        refreshQuota()
-        observeWork()
-    }
-
-    private suspend fun refreshQuota() {
-        try {
-            val quota = api.getQuota()
-            _state.update { it.copy(quota = quota) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            fail("Could not read storage: ${e.message}")
-        }
-    }
-
-    fun setLevel(level: CompressionLevel) {
-        prefs.edit().putString("level", level.name).apply()
-        _state.update { it.copy(level = level) }
-    }
-
-    fun setWifiOnly(value: Boolean) {
-        prefs.edit().putBoolean("wifiOnly", value).apply()
-        _state.update { it.copy(wifiOnly = value) }
-    }
-
-    fun setChargingOnly(value: Boolean) {
-        prefs.edit().putBoolean("chargingOnly", value).apply()
-        _state.update { it.copy(chargingOnly = value) }
-    }
-
-    fun scan() {
-        viewModelScope.launch {
-            _state.update { it.copy(phase = Phase.Scanning, scanCount = 0, scan = null, error = null) }
-            try {
-                val files = api.listFiles { n -> _state.update { it.copy(scanCount = n) } }
-                val quota = api.getQuota()
-                _state.update { it.copy(phase = Phase.Scanned, scan = files.toScanResult(), quota = quota, result = null) }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _state.update { it.copy(phase = Phase.Connected) }
+                _state.update { it.copy(phase = Phase.Idle) }
                 fail("Scan failed: ${e.message}")
             }
         }
     }
 
-    fun startCompression() {
+    // ---- run ------------------------------------------------------------------------------
+
+    /** Asks Android for permission to edit the files (one prompt), then starts the background job. */
+    fun requestWriteAccess() {
+        val items = candidates.take(MAX_FILES_PER_RUN)
+        if (items.isEmpty()) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val request = MediaStore.createWriteRequest(app.contentResolver, items.map { it.uri })
+                _writeRequests.tryEmit(request)
+            } catch (e: Exception) {
+                fail("Could not ask for permission: ${e.message}")
+            }
+        } else {
+            startCompression()
+        }
+    }
+
+    fun onWriteResult(granted: Boolean) {
+        if (granted) startCompression()
+        else fail("Permission to edit files was not given, so nothing was changed.")
+    }
+
+    private fun startCompression() {
         val s = _state.value
+        val items = candidates.take(MAX_FILES_PER_RUN)
+        if (items.isEmpty()) return
+
+        QueueFile.write(app, items)
+        runUsedBefore = DeviceStorage.read().used
+
         val constraints = Constraints.Builder()
-            .setRequiredNetworkType(if (s.wifiOnly) NetworkType.UNMETERED else NetworkType.CONNECTED)
             .setRequiresCharging(s.chargingOnly)
+            .setRequiresBatteryNotLow(true)
             .build()
         val request = OneTimeWorkRequestBuilder<CompressionWorker>()
-            .setInputData(
-                workDataOf(
-                    CompressionWorker.KEY_LEVEL to s.level.name,
-                    CompressionWorker.KEY_BEFORE to (s.quota?.usage ?: 0L),
-                )
-            )
+            .setInputData(workDataOf(CompressionWorker.KEY_BEFORE to runUsedBefore))
             .setConstraints(constraints)
             .build()
         currentRunId = request.id
@@ -260,21 +274,23 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun finishRun(out: Data, error: String?) {
-        refreshQuota()
-        val after = _state.value.quota?.usage
+    private fun finishRun(out: Data, error: String?) {
+        val storage = DeviceStorage.read()
         val result = RunResult(
             compressed = out.getInt(CompressionWorker.KEY_COMPRESSED, 0),
             skipped = out.getInt(CompressionWorker.KEY_SKIPPED, 0),
             failed = out.getInt(CompressionWorker.KEY_FAILED, 0),
             savedBytes = out.getLong(CompressionWorker.KEY_SAVED, 0L),
-            beforeBytes = out.getLong(CompressionWorker.KEY_BEFORE, 0L),
-            afterBytes = after,
+            usedBefore = out.getLong(CompressionWorker.KEY_BEFORE, runUsedBefore),
+            usedAfter = storage.used,
         )
+        candidates = emptyList()
         _state.update {
             it.copy(
                 phase = Phase.Done,
                 progress = null,
+                scan = null,
+                storage = storage,
                 result = result,
                 error = error?.takeIf { e -> e.isNotEmpty() },
             )
@@ -288,6 +304,8 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private fun fail(message: String) {
         _state.update { it.copy(error = message) }
     }
+
+    private fun nowSeconds() = System.currentTimeMillis() / 1000
 
     private fun Data.toProgress() = RunProgress(
         done = getInt(CompressionWorker.KEY_DONE, 0),
@@ -304,6 +322,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         CompressionWorker.KEY_SKIPPED to skipped,
         CompressionWorker.KEY_FAILED to failed,
         CompressionWorker.KEY_SAVED to savedBytes,
-        CompressionWorker.KEY_BEFORE to (_state.value.quota?.usage ?: 0L),
+        CompressionWorker.KEY_BEFORE to runUsedBefore,
     )
 }

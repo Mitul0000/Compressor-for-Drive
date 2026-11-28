@@ -35,13 +35,18 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.roundToInt
 
+/**
+ * PRESERVED  - no visible difference (PNG is re-saved with zero loss).
+ * BALANCED   - a slight, hard-to-notice loss.
+ * MAX_SAVING - frees the most space, with a small quality drop.
+ */
 enum class CompressionLevel(
     val jpegQuality: Int,
     val ssimThreshold: Double,
     val videoBitrateFactor: Double,
     val videoShortSideCap: Int?,
 ) {
-    SAFE(90, 0.97, 0.70, null),
+    PRESERVED(92, 0.98, 0.75, null),
     BALANCED(85, 0.95, 0.50, null),
     MAX_SAVING(75, 0.93, 0.35, 1080),
 }
@@ -71,16 +76,57 @@ class Compressor(context: Context) {
         workDir: File,
         onProgress: (Float) -> Unit = {},
     ): CompressionOutcome = when {
-        mimeType == "image/jpeg" || mimeType == "image/png" -> compressImage(input, fileName, mimeType, level, workDir)
-        mimeType.startsWith("video/") -> compressVideo(input, fileName, mimeType, level, workDir, onProgress)
-        mimeType == "application/pdf" -> CompressionOutcome.Skipped("PDF compression is not added yet")
+        mimeType == "image/jpeg" -> compressImage(input, fileName, level, workDir)
+        mimeType == "image/png" -> compressPng(input, fileName, workDir)
+        mimeType.startsWith("video/") -> compressVideo(input, fileName, level, workDir, onProgress)
         else -> CompressionOutcome.Skipped("File type not supported")
+    }
+
+    /** PNG is always handled losslessly: same pixels, just packed smaller. Kept only if verified identical. */
+    private suspend fun compressPng(
+        input: File,
+        fileName: String,
+        workDir: File,
+    ): CompressionOutcome = withContext(Dispatchers.Default) {
+        val originalSize = input.length()
+        if (originalSize < MIN_IMAGE_BYTES) return@withContext CompressionOutcome.Skipped("Already small")
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(input.absolutePath, bounds)
+        if (bounds.outWidth <= 0) return@withContext CompressionOutcome.Skipped("Not a readable image")
+        if (bounds.outWidth.toLong() * bounds.outHeight > MAX_PNG_PIXELS) {
+            return@withContext CompressionOutcome.Skipped("Image too large to process safely")
+        }
+
+        val bitmap = BitmapFactory.decodeFile(input.absolutePath)
+            ?: return@withContext CompressionOutcome.Skipped("Could not decode image")
+        val out = File(workDir, "out_${System.nanoTime()}.png")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && bitmap.colorSpace?.isSrgb == false) {
+                return@withContext CompressionOutcome.Skipped("Wide colour profile")
+            }
+            FileOutputStream(out).use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            val newSize = out.length()
+            if (newSize > originalSize * (1 - MIN_PNG_SAVING)) {
+                out.delete()
+                return@withContext CompressionOutcome.Skipped("Not enough saving")
+            }
+            val check = BitmapFactory.decodeFile(out.absolutePath)
+            val identical = check != null && bitmap.sameAs(check)
+            check?.recycle()
+            if (!identical) {
+                out.delete()
+                return@withContext CompressionOutcome.Skipped("Lossless check failed")
+            }
+            CompressionOutcome.Success(out, fileName, "image/png", originalSize, newSize, 1.0)
+        } finally {
+            bitmap.recycle()
+        }
     }
 
     private suspend fun compressImage(
         input: File,
         fileName: String,
-        mimeType: String,
         level: CompressionLevel,
         workDir: File,
     ): CompressionOutcome = withContext(Dispatchers.Default) {
@@ -88,8 +134,7 @@ class Compressor(context: Context) {
         // MIN_IMAGE_BYTES is the single top-level constant in scanResult.kt
         if (originalSize < MIN_IMAGE_BYTES) return@withContext CompressionOutcome.Skipped("Already small")
 
-        val isPng = mimeType == "image/png"
-        if (!isPng && hasUnsupportedExtras(input)) {
+        if (hasUnsupportedExtras(input)) {
             return@withContext CompressionOutcome.Skipped("Has HDR or Motion Photo data")
         }
 
@@ -100,7 +145,7 @@ class Compressor(context: Context) {
             return@withContext CompressionOutcome.Skipped("Image too large to process safely")
         }
 
-        val newName = if (isPng) fileName.substringBeforeLast('.', fileName) + ".jpg" else fileName
+        val newName = fileName
         val out = File(workDir, "out_${System.nanoTime()}.jpg")
 
         val bitmap = BitmapFactory.decodeFile(input.absolutePath)
@@ -112,13 +157,12 @@ class Compressor(context: Context) {
                 return@withContext CompressionOutcome.Skipped("Wide colour profile")
             }
 
-            // PNGs are often screenshots/text, where lossy artefacts show more: be stricter.
-            val threshold = if (isPng) minOf(0.99, level.ssimThreshold + 0.02) else level.ssimThreshold
+            val threshold = level.ssimThreshold
 
             var quality = level.jpegQuality
             repeat(2) { attempt ->
                 FileOutputStream(out).use { bitmap.compress(Bitmap.CompressFormat.JPEG, quality, it) }
-                if (!isPng) copyExif(input, out)
+                copyExif(input, out)
 
                 val newSize = out.length()
                 if (newSize > originalSize * (1 - MIN_SAVING)) {
@@ -165,7 +209,6 @@ class Compressor(context: Context) {
     private suspend fun compressVideo(
         input: File,
         fileName: String,
-        mimeType: String,
         level: CompressionLevel,
         workDir: File,
         onProgress: (Float) -> Unit,
@@ -267,7 +310,7 @@ class Compressor(context: Context) {
             try {
                 suspendCancellableCoroutine<Unit> { cont ->
                     val t = Transformer.Builder(appContext)
-                        .setVideoMimeType(MimeTypes.VIDEO_H264)
+                        .setVideoMimeType(MimeTypes.VIDEO_H265) // falls back to H.264 if the phone cannot encode HEVC
                         .setEncoderFactory(encoderFactory)
                         .addListener(object : Transformer.Listener {
                             override fun onCompleted(composition: Composition, exportResult: ExportResult) {
@@ -297,6 +340,8 @@ class Compressor(context: Context) {
 
     private companion object {
         const val MAX_PIXELS = 50_000_000L
+        const val MAX_PNG_PIXELS = 24_000_000L
+        const val MIN_PNG_SAVING = 0.05
         const val MIN_SAVING = 0.10
         const val MIN_VIDEO_BITRATE = 2_000_000
         const val MIN_TARGET_BITRATE = 1_000_000

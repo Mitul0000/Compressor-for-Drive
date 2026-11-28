@@ -1,12 +1,17 @@
 package com.digifello.compressorfordrive.ui.Core
 
 const val MIN_IMAGE_BYTES = 500L * 1024
+const val MIN_VIDEO_BYTES = 5L * 1024 * 1024
 
-fun DriveFile.isCandidate(): Boolean = ownedByMe && !alreadyCompressed && when (kind) {
-    FileKind.IMAGE -> size >= MIN_IMAGE_BYTES
-    FileKind.VIDEO -> true
-    else -> false
-}
+/** One run handles the biggest files first; this keeps the single permission prompt manageable. */
+const val MAX_FILES_PER_RUN = 3000
+
+data class KindSummary(val count: Int, val bytes: Long)
+
+fun LocalMedia.isBigEnough(): Boolean = size >= if (isVideo) MIN_VIDEO_BYTES else MIN_IMAGE_BYTES
+
+fun LocalMedia.isCandidate(store: ProcessedStore, level: CompressionLevel): Boolean =
+    isBigEnough() && store.shouldProcess(this, level)
 
 data class ScanResult(
     val photos: KindSummary,
@@ -16,27 +21,28 @@ data class ScanResult(
     val eligibleCount: Int get() = photos.count + videos.count
 }
 
-fun List<DriveFile>.toScanResult(): ScanResult {
-    fun List<DriveFile>.summary() = KindSummary(size, sumOf { it.size })
-    val (eligible, rest) = partition { it.isCandidate() }
-    return ScanResult(
-        photos = eligible.filter { it.kind == FileKind.IMAGE }.summary(),
-        videos = eligible.filter { it.kind == FileKind.VIDEO }.summary(),
-        skipped = rest.filter { it.ownedByMe }.summary(),
+class ScanOutcome(val summary: ScanResult, val candidates: List<LocalMedia>)
+
+fun List<LocalMedia>.classify(store: ProcessedStore, level: CompressionLevel): ScanOutcome {
+    fun List<LocalMedia>.summary() = KindSummary(size, sumOf { it.size })
+    val (eligible, rest) = partition { it.isCandidate(store, level) }
+    return ScanOutcome(
+        summary = ScanResult(
+            photos = eligible.filter { !it.isVideo }.summary(),
+            videos = eligible.filter { it.isVideo }.summary(),
+            skipped = rest.summary(),
+        ),
+        candidates = eligible.sortedByDescending { it.size },
     )
 }
 
 fun CompressionLevel.photoRatio(): Double = when (this) {
-    CompressionLevel.SAFE -> 0.60
-    CompressionLevel.BALANCED -> 0.45
-    CompressionLevel.MAX_SAVING -> 0.30
-}
-
-fun CompressionLevel.videoRatio(): Double = when (this) {
-    CompressionLevel.SAFE -> 0.70
+    CompressionLevel.PRESERVED -> 0.70
     CompressionLevel.BALANCED -> 0.50
     CompressionLevel.MAX_SAVING -> 0.35
 }
+
+fun CompressionLevel.videoRatio(): Double = videoBitrateFactor
 
 fun ScanResult.estimatedSavedBytes(level: CompressionLevel): Long =
     (photos.bytes * (1 - level.photoRatio()) + videos.bytes * (1 - level.videoRatio())).toLong()

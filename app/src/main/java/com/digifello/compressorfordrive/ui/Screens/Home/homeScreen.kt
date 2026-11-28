@@ -1,6 +1,7 @@
 package com.digifello.compressorfordrive.ui.Screens.Home
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -19,6 +20,8 @@ import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -48,13 +51,19 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.digifello.compressorfordrive.ui.Core.CompressionLevel
-import com.digifello.compressorfordrive.ui.Core.DriveQuota
+import com.digifello.compressorfordrive.ui.Core.DeviceStorage
 import com.digifello.compressorfordrive.ui.Core.KindSummary
+import com.digifello.compressorfordrive.ui.Core.MAX_FILES_PER_RUN
+import com.digifello.compressorfordrive.ui.Core.MediaAccess
 import com.digifello.compressorfordrive.ui.Core.ScanResult
+import com.digifello.compressorfordrive.ui.Core.Scope
 import com.digifello.compressorfordrive.ui.Core.estimatedSavedBytes
 import com.digifello.compressorfordrive.ui.theme.CompressorForDriveTheme
+import java.text.DateFormat
+import java.util.Date
 
 @Composable
 fun HomeScreen(vm: HomeViewModel) {
@@ -62,79 +71,95 @@ fun HomeScreen(vm: HomeViewModel) {
     val context = LocalContext.current
     var confirmStart by remember { mutableStateOf(false) }
 
-    val consentLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult()
-    ) { vm.onConsentResult(it.data) }
-
-    val accountLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { vm.onAccountPicked(it.data) }
-
-    LaunchedEffect(Unit) {
-        vm.accountPickerRequests.collect { accountLauncher.launch(it) }
+    LifecycleResumeEffect(Unit) {
+        vm.refreshAccess()
+        onPauseOrDispose { }
     }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { vm.refreshAccess() }
+
+    // Android's one-time "allow this app to edit these files" prompt.
+    val writeLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult()
+    ) { vm.onWriteResult(it.resultCode == Activity.RESULT_OK) }
 
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
-    ) { vm.startCompression() }
+    ) { vm.requestWriteAccess() }
+
+    val dailyCheckLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted -> vm.setDailyCheck(granted) }
 
     LaunchedEffect(Unit) {
-        vm.consentRequests.collect { consentLauncher.launch(IntentSenderRequest.Builder(it).build()) }
+        vm.writeRequests.collect { writeLauncher.launch(IntentSenderRequest.Builder(it).build()) }
     }
+
+    fun needsNotificationPermission() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
 
     HomeContent(
         state = state,
-        onConnect = vm::connect,
-        onChangeAccount = vm::changeAccount,
-        onLevel = vm::setLevel,
-        onWifiOnly = vm::setWifiOnly,
-        onChargingOnly = vm::setChargingOnly,
-        onScan = vm::scan,
-        onStart = { confirmStart = true },
-        onStop = vm::stop,
-        onDismissError = vm::dismissError,
+        actions = Actions(
+            onGrantAccess = { permissionLauncher.launch(MediaAccess.permissionsToRequest()) },
+            onLevel = vm::setLevel,
+            onScope = vm::setScope,
+            onStartFromNow = vm::startFromNow,
+            onChargingOnly = vm::setChargingOnly,
+            onDailyCheck = { on ->
+                if (on && needsNotificationPermission()) dailyCheckLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                else vm.setDailyCheck(on)
+            },
+            onScan = vm::scan,
+            onStart = { confirmStart = true },
+            onStop = vm::stop,
+            onDismissError = vm::dismissError,
+        ),
     )
 
     if (confirmStart) {
         AlertDialog(
             onDismissRequest = { confirmStart = false },
-            title = { Text("Replace files in Drive?") },
+            title = { Text("Replace your originals?") },
             text = {
                 Text(
-                    "Each file is replaced by a smaller version and the old version is deleted. " +
-                            "This cannot be undone."
+                    "Each photo and video is replaced by a smaller version, keeping its name, date and album. " +
+                            "Android will ask once for permission to edit the files. " +
+                            "There is no backup, so this cannot be undone."
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     confirmStart = false
-                    val needsPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-                            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-                            PackageManager.PERMISSION_GRANTED
-                    if (needsPermission) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    else vm.startCompression()
-                }) { Text("Start") }
+                    if (needsNotificationPermission()) notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    else vm.requestWriteAccess()
+                }) { Text("Continue") }
             },
             dismissButton = { TextButton(onClick = { confirmStart = false }) { Text("Cancel") } },
         )
     }
 }
 
+private class Actions(
+    val onGrantAccess: () -> Unit,
+    val onLevel: (CompressionLevel) -> Unit,
+    val onScope: (Scope) -> Unit,
+    val onStartFromNow: () -> Unit,
+    val onChargingOnly: (Boolean) -> Unit,
+    val onDailyCheck: (Boolean) -> Unit,
+    val onScan: () -> Unit,
+    val onStart: () -> Unit,
+    val onStop: () -> Unit,
+    val onDismissError: () -> Unit,
+)
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun HomeContent(
-    state: HomeUiState,
-    onConnect: () -> Unit,
-    onChangeAccount: () -> Unit,
-    onLevel: (CompressionLevel) -> Unit,
-    onWifiOnly: (Boolean) -> Unit,
-    onChargingOnly: (Boolean) -> Unit,
-    onScan: () -> Unit,
-    onStart: () -> Unit,
-    onStop: () -> Unit,
-    onDismissError: () -> Unit,
-) {
-    Scaffold(topBar = { TopAppBar(title = { Text("Compressor for Drive") }) }) { padding ->
+private fun HomeContent(state: HomeUiState, actions: Actions) {
+    Scaffold(topBar = { TopAppBar(title = { Text("Storage Compressor") }) }) { padding ->
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -142,65 +167,65 @@ private fun HomeContent(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            state.error?.let { ErrorBanner(it, onDismissError) }
-            AccountSection(state, onConnect, onChangeAccount)
+            state.error?.let { ErrorBanner(it, actions.onDismissError) }
+            OfflineCard()
+            if (!state.hasAccess) AccessSection(actions.onGrantAccess)
             StorageSection(state)
-            LevelSection(state, onLevel, onWifiOnly, onChargingOnly)
-            ScanSection(state, onScan)
+            QualitySection(state, actions.onLevel)
+            OptionsSection(state, actions)
+            ScanSection(state, actions.onScan)
             EstimateSection(state)
-            ActionSection(state, onStart, onStop)
+            ActionSection(state, actions.onStart, actions.onStop)
             ResultSection(state)
         }
     }
 }
 
 @Composable
-private fun AccountSection(state: HomeUiState, onConnect: () -> Unit, onChange: () -> Unit) {
-    Section("Account") {
-        if (state.phase == Phase.Disconnected) {
-            Button(onClick = onConnect, modifier = Modifier.fillMaxWidth()) { Text("Connect Google Drive") }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(
-                    text = state.email ?: "Connected",
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                TextButton(onClick = onChange, enabled = !state.isBusy) { Text("Change account") }
-            }
+private fun OfflineCard() {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+    ) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(
+                "Works completely offline",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            Text(
+                "No account, no internet permission, no uploads. Everything is compressed on this phone " +
+                        "and your files never leave it.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
         }
     }
 }
 
 @Composable
+private fun AccessSection(onGrant: () -> Unit) {
+    Section("Access") {
+        Note("To find and shrink your photos and videos, the app needs permission to see them. They stay on your phone.")
+        Button(onClick = onGrant, modifier = Modifier.fillMaxWidth()) { Text("Allow access to photos and videos") }
+    }
+}
+
+@Composable
 private fun StorageSection(state: HomeUiState) {
-    val connected = state.phase != Phase.Disconnected
-    Section("Drive storage") {
-        OutlinedCard(modifier = Modifier.fillMaxWidth().alpha(if (connected) 1f else 0.5f)) {
+    Section("Phone storage") {
+        OutlinedCard(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val quota = state.quota
-                when {
-                    !connected -> Text("Not connected")
-                    quota == null -> Text("Loading...")
-                    else -> {
-                        val limit = quota.limit
-                        Text(
-                            if (limit != null) "${formatBytes(quota.usage)} used of ${formatBytes(limit)}"
-                            else "${formatBytes(quota.usage)} used"
-                        )
-                        if (limit != null && limit > 0) {
-                            LinearProgressIndicator(
-                                progress = { (quota.usage.toFloat() / limit).coerceIn(0f, 1f) },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                        if (quota.usageInTrash > 0) Note("Includes ${formatBytes(quota.usageInTrash)} in trash")
-                    }
+                val storage = state.storage
+                if (storage == null || storage.total <= 0) {
+                    Text("Unavailable")
+                } else {
+                    Text("${formatBytes(storage.used)} used of ${formatBytes(storage.total)}")
+                    LinearProgressIndicator(
+                        progress = { (storage.used.toFloat() / storage.total).coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Note("${formatBytes(storage.free)} free")
                 }
             }
         }
@@ -208,23 +233,27 @@ private fun StorageSection(state: HomeUiState) {
 }
 
 @Composable
-private fun LevelSection(
-    state: HomeUiState,
-    onLevel: (CompressionLevel) -> Unit,
-    onWifiOnly: (Boolean) -> Unit,
-    onChargingOnly: (Boolean) -> Unit,
-) {
-    val enabled = state.phase != Phase.Disconnected && state.phase != Phase.Running
-    Section("Compression level") {
+private fun QualitySection(state: HomeUiState, onLevel: (CompressionLevel) -> Unit) {
+    val enabled = state.phase != Phase.Running
+    Section("Compression quality") {
         Column(modifier = Modifier.selectableGroup().alpha(if (enabled) 1f else 0.5f)) {
-            LevelOption("Safe", "Smallest quality change, smaller savings", CompressionLevel.SAFE, state.level, enabled, onLevel)
-            LevelOption("Balanced", "Recommended", CompressionLevel.BALANCED, state.level, enabled, onLevel)
-            LevelOption("Max saving", "Largest savings, slight quality loss", CompressionLevel.MAX_SAVING, state.level, enabled, onLevel)
+            LevelOption(
+                "Quality preserved",
+                "Looks identical to the original. PNG files are shrunk with no loss at all. Smallest saving.",
+                CompressionLevel.PRESERVED, state.level, enabled, onLevel,
+            )
+            LevelOption(
+                "Balanced (recommended)",
+                "A slight loss you are unlikely to notice. Good saving.",
+                CompressionLevel.BALANCED, state.level, enabled, onLevel,
+            )
+            LevelOption(
+                "Max storage",
+                "Frees the most space, with a small drop in quality. Videos are capped at 1080p.",
+                CompressionLevel.MAX_SAVING, state.level, enabled, onLevel,
+            )
         }
-        Column(modifier = Modifier.alpha(if (enabled) 1f else 0.5f)) {
-            CheckOption("Use Wi-Fi only", state.wifiOnly, enabled, onWifiOnly)
-            CheckOption("Only while charging", state.chargingOnly, enabled, onChargingOnly)
-        }
+        Note("Each result is checked against the original. Files that would look noticeably worse are left untouched.")
     }
 }
 
@@ -253,6 +282,44 @@ private fun LevelOption(
 }
 
 @Composable
+private fun OptionsSection(state: HomeUiState, actions: Actions) {
+    val enabled = state.phase != Phase.Running
+    Section("What to compress") {
+        Column(modifier = Modifier.selectableGroup().alpha(if (enabled) 1f else 0.5f)) {
+            ScopeOption("All photos and videos", Scope.ALL, state.scope, enabled, actions.onScope)
+            ScopeOption("Only new files from now on", Scope.NEW_ONLY, state.scope, enabled, actions.onScope)
+        }
+        if (state.scope == Scope.NEW_ONLY) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()) {
+                Note("Counting files added after ${formatDate(state.sinceSeconds)}", modifier = Modifier.weight(1f))
+                TextButton(onClick = actions.onStartFromNow, enabled = enabled) { Text("Start from now") }
+            }
+        }
+        Column(modifier = Modifier.alpha(if (enabled) 1f else 0.5f)) {
+            CheckOption("Only while charging", state.chargingOnly, enabled, actions.onChargingOnly)
+            if (state.scope == Scope.NEW_ONLY) {
+                CheckOption("Check daily and remind me about new files", state.dailyCheck, enabled, actions.onDailyCheck)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScopeOption(label: String, value: Scope, selected: Scope, enabled: Boolean, onSelect: (Scope) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(selected = value == selected, enabled = enabled, role = Role.RadioButton) { onSelect(value) }
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = value == selected, onClick = null, enabled = enabled)
+        Text(label, modifier = Modifier.padding(start = 12.dp))
+    }
+}
+
+@Composable
 private fun CheckOption(label: String, checked: Boolean, enabled: Boolean, onChange: (Boolean) -> Unit) {
     Row(
         modifier = Modifier
@@ -268,13 +335,13 @@ private fun CheckOption(label: String, checked: Boolean, enabled: Boolean, onCha
 
 @Composable
 private fun ScanSection(state: HomeUiState, onScan: () -> Unit) {
-    val canScan = state.phase == Phase.Connected || state.phase == Phase.Scanned || state.phase == Phase.Done
+    val canScan = state.hasAccess && state.phase != Phase.Scanning && state.phase != Phase.Running
     Section("Scan") {
-        OutlinedButton(onClick = onScan, enabled = canScan, modifier = Modifier.fillMaxWidth()) { Text("Scan Drive") }
+        OutlinedButton(onClick = onScan, enabled = canScan, modifier = Modifier.fillMaxWidth()) { Text("Scan this phone") }
         if (state.phase == Phase.Scanning) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                Text("Scanning... ${"%,d".format(state.scanCount)} files")
+                Text("Scanning...")
             }
         }
         state.scan?.let { ScanTable(it) }
@@ -289,7 +356,10 @@ private fun ScanTable(scan: ScanResult) {
         TableRow("Photos and images", scan.photos)
         TableRow("Videos", scan.videos)
         TableRow("Skipped", scan.skipped)
-        Note("Skipped: PDFs, other file types, small photos, files you do not own, and files already compressed.")
+        Note("Skipped: small files, files already compressed, and formats the app does not handle.")
+        if (scan.eligibleCount > MAX_FILES_PER_RUN) {
+            Note("The ${"%,d".format(MAX_FILES_PER_RUN)} biggest files are handled in each run. Run again for the rest.")
+        }
     }
 }
 
@@ -310,14 +380,14 @@ private fun TableRow(a: String, b: String, c: String, header: Boolean = false) {
 @Composable
 private fun EstimateSection(state: HomeUiState) {
     val scan = state.scan ?: return
-    val quota = state.quota ?: return
-    if (state.phase == Phase.Done || state.phase == Phase.Scanning) return
+    val storage = state.storage ?: return
+    if (state.phase != Phase.Scanned) return
     Section("Estimate") {
         if (scan.eligibleCount == 0) {
             Text("Nothing to compress.")
         } else {
             val saved = scan.estimatedSavedBytes(state.level)
-            Text("Estimated storage after compression: ${formatBytes((quota.usage - saved).coerceAtLeast(0))} (about ${formatBytes(saved)} saved)")
+            Text("Free space after compression: about ${formatBytes(storage.free + saved)} (${formatBytes(saved)} freed)")
             Note("Estimate only. Actual savings depend on your files.")
         }
     }
@@ -327,25 +397,18 @@ private fun EstimateSection(state: HomeUiState) {
 private fun ActionSection(state: HomeUiState, onStart: () -> Unit, onStop: () -> Unit) {
     val ready = state.phase == Phase.Scanned && (state.scan?.eligibleCount ?: 0) > 0
     Section("Compression") {
-        Button(
-            onClick = onStart,
-            enabled = ready,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Start compression") }
+        Button(onClick = onStart, enabled = ready, modifier = Modifier.fillMaxWidth()) { Text("Start compression") }
 
         if (state.phase == Phase.Running) {
             val p = state.progress
             if (p == null || p.total == 0) {
                 Text("Waiting to start...")
-                if (state.wifiOnly || state.chargingOnly) Note("The job starts when the Wi-Fi or charging condition is met.")
+                if (state.chargingOnly) Note("The job starts when the phone is charging.")
             } else {
-                LinearProgressIndicator(
-                    progress = { p.done.toFloat() / p.total },
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                LinearProgressIndicator(progress = { p.done.toFloat() / p.total }, modifier = Modifier.fillMaxWidth())
                 Text("Processing ${p.done} of ${p.total} files")
                 if (p.current.isNotEmpty()) Note(p.current, maxLines = 1)
-                Note("Saved so far: ${formatBytes(p.savedBytes)}")
+                Note("Freed so far: ${formatBytes(p.savedBytes)}")
             }
             TextButton(onClick = onStop) { Text("Stop") }
             Note("Runs in the background. You can close the app.")
@@ -361,10 +424,10 @@ private fun ResultSection(state: HomeUiState) {
         ResultRow("Files compressed", "%,d".format(r.compressed))
         ResultRow("Files skipped", "%,d".format(r.skipped))
         if (r.failed > 0) ResultRow("Files failed", "%,d".format(r.failed))
-        ResultRow("Storage before", formatBytes(r.beforeBytes))
-        ResultRow("Storage after", r.afterBytes?.let { formatBytes(it) } ?: "Unknown")
+        if (r.usedBefore > 0) ResultRow("Storage used before", formatBytes(r.usedBefore))
+        ResultRow("Storage used after", formatBytes(r.usedAfter))
         ResultRow("Space freed", formatBytes(r.savedBytes))
-        Note("Google can take a few minutes to update the storage figure.")
+        Note("Your gallery may take a moment to show the new file sizes.")
     }
 }
 
@@ -385,9 +448,10 @@ private fun Section(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Note(text: String, maxLines: Int = Int.MAX_VALUE) {
+private fun Note(text: String, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
     Text(
         text = text,
+        modifier = modifier,
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         maxLines = maxLines,
@@ -408,7 +472,8 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
     }
 }
 
-private val HomeUiState.isBusy: Boolean get() = phase == Phase.Scanning || phase == Phase.Running
+private fun formatDate(epochSeconds: Long): String =
+    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(epochSeconds * 1000))
 
 private fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
@@ -422,32 +487,15 @@ private fun formatBytes(bytes: Long): String {
     return "%.1f %s".format(value, units[i])
 }
 
-private val sampleQuota = DriveQuota(limit = 15L shl 30, usage = 12_400L shl 20, usageInDrive = 9L shl 30, usageInTrash = 600L shl 20)
+private val sampleStorage = DeviceStorage(total = 128L shl 30, free = 9L shl 30)
 private val sampleScan = ScanResult(KindSummary(840, 5L shl 30), KindSummary(60, 4L shl 30), KindSummary(340, 2L shl 30))
-
-@Preview(showBackground = true)
-@Composable
-private fun PreviewDisconnected() = CompressorForDriveTheme(dynamicColor = false) {
-    HomeContent(HomeUiState(ready = true), {}, {}, {}, {}, {}, {}, {}, {}, {})
-}
+private val noActions = Actions({}, {}, {}, {}, {}, {}, {}, {}, {}, {})
 
 @Preview(showBackground = true)
 @Composable
 private fun PreviewScanned() = CompressorForDriveTheme(dynamicColor = false) {
     HomeContent(
-        HomeUiState(ready = true, phase = Phase.Scanned, email = "name@gmail.com", quota = sampleQuota, scan = sampleScan),
-        {}, {}, {}, {}, {}, {}, {}, {}, {},
-    )
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun PreviewRunning() = CompressorForDriveTheme(dynamicColor = false) {
-    HomeContent(
-        HomeUiState(
-            ready = true, phase = Phase.Running, email = "name@gmail.com", quota = sampleQuota, scan = sampleScan,
-            progress = RunProgress(120, 860, "IMG_2041.jpg", 98, 20, 2, 640L shl 20),
-        ),
-        {}, {}, {}, {}, {}, {}, {}, {}, {},
+        HomeUiState(hasAccess = true, phase = Phase.Scanned, storage = sampleStorage, scan = sampleScan),
+        noActions,
     )
 }

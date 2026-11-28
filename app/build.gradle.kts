@@ -67,7 +67,6 @@ android {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation("com.google.android.gms:play-services-auth:22.0.0")
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
@@ -84,7 +83,6 @@ dependencies {
     implementation(libs.androidx.media3.transformer)
     implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
-    implementation(libs.okhttp)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation("junit:junit:4.13.2")
     testImplementation(libs.junit)

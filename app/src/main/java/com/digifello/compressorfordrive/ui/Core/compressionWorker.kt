@@ -18,10 +18,12 @@ import com.digifello.compressorfordrive.MainActivity
 import kotlinx.coroutines.CancellationException
 import java.io.File
 
+/** Compresses the queued photos and videos on the phone. Fully offline. */
 class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     private enum class Kind { COMPRESSED, SKIPPED, FAILED }
-    private class FileResult(val kind: Kind, val saved: Long = 0)
+
+    private class FileResult(val kind: Kind, val saved: Long = 0, val needsPermission: Boolean = false)
 
     private var done = 0
     private var compressed = 0
@@ -30,57 +32,49 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
     private var saved = 0L
 
     override suspend fun doWork(): Result {
-        val level = runCatching { CompressionLevel.valueOf(inputData.getString(KEY_LEVEL).orEmpty()) }
-            .getOrDefault(CompressionLevel.BALANCED)
+        val ctx = applicationContext
+        val level = AppSettings(ctx).level
         val before = inputData.getLong(KEY_BEFORE, 0L)
 
+        if (!MediaAccess.hasAccess(ctx)) {
+            return Result.failure(output(0, before, "Allow access to photos and videos first."))
+        }
         try { setForeground(foregroundInfo(0, 0)) } catch (_: Exception) { }
 
-        val connect = ConnectDrive(applicationContext)
-        // CHANGED: token provider now takes forceRefresh
-        val tokens: suspend (Boolean) -> String = { forceRefresh -> connect.accessToken(forceRefresh) }
-        val api = DriveApi(tokens)
-        val uploader = DriveUploader(tokens)
-        val compressor = Compressor(applicationContext)
+        val keys = QueueFile.read(ctx)
+        val total = keys.size
+        val scanner = LocalScanner(ctx)
+        val store = ProcessedStore.forApp(ctx)
+        val writer = MediaWriter(ctx)
+        val compressor = Compressor(ctx)
 
-        val workDir = File(applicationContext.cacheDir, "compress").apply {
+        val workDir = File(ctx.cacheDir, "compress").apply {
             deleteRecursively()
             mkdirs()
         }
 
-        val allFiles = try {
-            api.listFiles()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            return Result.failure(output(0, before, e.message ?: "Could not read Drive"))
-        }
-        val candidates = allFiles.filter { it.isCandidate() }.sortedByDescending { it.size }
-        val pending = allFiles.filter { it.ownedByMe && it.needsCleanup }
-
-        val total = candidates.size
         var consecutiveFailures = 0
         try {
-            for (file in pending) {
-                try {
-                    // CHANGED: pass the stored checksum; skip if we don't have one
-                    val expected = file.expectedMd5 ?: continue
-                    uploader.deleteOldRevisions(file.id, expected)
-                    uploader.setState(file.id, DriveApi.STATE_DONE)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                }
-            }
+            for (key in keys) {
+                val media = QueueFile.parse(key)?.let { (isVideo, id) -> scanner.get(isVideo, id) }
+                report(total, media?.name.orEmpty(), before)
 
-            for (file in candidates) {
-                report(total, file.name, before)
-                val result = try {
-                    processFile(file, level, api, uploader, compressor, workDir)
+                val result = if (media == null) {
+                    FileResult(Kind.SKIPPED) // deleted or changed since the scan
+                } else try {
+                    processFile(media, level, store, writer, compressor, workDir)
                 } catch (e: CancellationException) {
                     throw e
+                } catch (e: SecurityException) {
+                    FileResult(Kind.FAILED, needsPermission = true)
                 } catch (e: Exception) {
                     FileResult(Kind.FAILED)
+                }
+
+                if (result.needsPermission) {
+                    return Result.failure(
+                        output(total, before, "Permission to edit files was not granted. Start again and tap Allow.")
+                    )
                 }
                 when (result.kind) {
                     Kind.COMPRESSED -> { compressed++; saved += result.saved; consecutiveFailures = 0 }
@@ -89,7 +83,7 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
                 }
                 done++
                 if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                    return Result.failure(output(total, before, "Stopped after repeated errors. Check your connection and account."))
+                    return Result.failure(output(total, before, "Stopped after repeated errors."))
                 }
             }
         } finally {
@@ -99,51 +93,29 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
     }
 
     private suspend fun processFile(
-        file: DriveFile,
+        media: LocalMedia,
         level: CompressionLevel,
-        api: DriveApi,
-        uploader: DriveUploader,
+        store: ProcessedStore,
+        writer: MediaWriter,
         compressor: Compressor,
         workDir: File,
     ): FileResult {
-        if (workDir.usableSpace < file.size * 2 + MIN_FREE_BYTES) return FileResult(Kind.SKIPPED)
+        if (workDir.usableSpace < media.size * 2 + MIN_FREE_BYTES) return FileResult(Kind.SKIPPED)
 
-        val input = File(workDir, "in_${file.id}")
+        val input = File(workDir, "in_${media.key}")
         try {
-            api.download(file.id, input)
-            if (input.length() != file.size) return FileResult(Kind.FAILED)
+            if (!writer.copyOriginal(media, input)) return FileResult(Kind.FAILED)
 
-            when (val outcome = compressor.compress(input, file.name, file.mimeType, level, workDir)) {
-                is CompressionOutcome.Skipped -> return FileResult(Kind.SKIPPED)
+            when (val outcome = compressor.compress(input, media.name, media.mime, level, workDir)) {
+                is CompressionOutcome.Skipped -> {
+                    store.markSkipped(media, level)
+                    return FileResult(Kind.SKIPPED)
+                }
                 is CompressionOutcome.Success -> try {
-                    val upload = try {
-                        // CHANGED: pass modifiedTime and expectedCurrentMd5
-                        uploader.replaceFile(
-                            fileId = file.id,
-                            local = outcome.file,
-                            newName = outcome.newName,
-                            newMimeType = outcome.mimeType,
-                            modifiedTime = file.modifiedTime,
-                            expectedCurrentMd5 = file.md5,
-                        )
-                    } catch (e: SourceChangedException) {
-                        // NEW: file was edited in Drive meanwhile, don't overwrite it
-                        return FileResult(Kind.SKIPPED)
-                    } catch (e: UploadVerificationException) {
-                        uploader.setState(file.id, DriveApi.STATE_FAILED)
-                        throw e
-                    }
-
-                    // CHANGED: pass the md5 of what we uploaded
-                    uploader.deleteOldRevisions(file.id, upload.md5)
-
-                    try {
-                        uploader.setState(file.id, DriveApi.STATE_DONE)
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                    }
-                    return FileResult(Kind.COMPRESSED, (file.size - upload.size).coerceAtLeast(0))
+                    // `input` is the untouched original: it is the backup if the write fails.
+                    writer.replace(media, outcome.file, input)
+                    store.markCompressed(media, outcome.newSize, level)
+                    return FileResult(Kind.COMPRESSED, (media.size - outcome.newSize).coerceAtLeast(0))
                 } finally {
                     outcome.file.delete()
                 }
@@ -176,8 +148,8 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
         )
         val stop = WorkManager.getInstance(ctx).createCancelPendingIntent(id)
         val notification = NotificationCompat.Builder(ctx, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setContentTitle("Compressing Drive files")
+            .setSmallIcon(android.R.drawable.stat_sys_download_done)
+            .setContentTitle("Compressing your files")
             .setContentText(if (total > 0) "$done of $total files" else "Preparing")
             .setProgress(total, done, total == 0)
             .setOngoing(true)
@@ -193,8 +165,7 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
     }
 
     companion object {
-        const val WORK_NAME = "compress_drive"
-        const val KEY_LEVEL = "level"
+        const val WORK_NAME = "compress_local"
         const val KEY_BEFORE = "before"
         const val KEY_DONE = "done"
         const val KEY_TOTAL = "total"

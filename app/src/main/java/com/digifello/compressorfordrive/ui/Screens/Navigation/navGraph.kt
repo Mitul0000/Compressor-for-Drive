@@ -1,8 +1,6 @@
 package com.digifello.compressorfordrive.ui.Screens.Navigation
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -15,13 +13,11 @@ import com.digifello.compressorfordrive.ui.Screens.Splash.SplashScreen
 fun AppNavGraph() {
     val navController = rememberNavController()
     val vm: HomeViewModel = viewModel()
-    val state by vm.state.collectAsStateWithLifecycle()
 
     NavHost(navController = navController, startDestination = Routes.SPLASH) {
         composable(Routes.SPLASH) {
             SplashScreen(
-                ready = state.ready,
-                onReady = {
+                onFinished = {
                     navController.navigate(Routes.HOME) {
                         popUpTo(Routes.SPLASH) { inclusive = true }
                     }
