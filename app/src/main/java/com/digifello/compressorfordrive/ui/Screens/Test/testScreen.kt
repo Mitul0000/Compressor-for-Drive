@@ -5,10 +5,11 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.net.Uri
+import android.graphics.SurfaceTexture
+import android.media.MediaPlayer
 import android.os.Build
-import android.widget.MediaController
-import android.widget.VideoView
+import android.view.Surface
+import android.view.TextureView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -37,12 +39,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -68,6 +74,7 @@ import com.digifello.compressorfordrive.ui.Screens.Home.ResultRow
 import com.digifello.compressorfordrive.ui.Screens.Home.Section
 import com.digifello.compressorfordrive.ui.Screens.Home.formatBytes
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -197,7 +204,7 @@ private fun ResultSection(state: TestUiState, result: TestResult) {
             Text("Not compressed: ${result.reason}")
             Note(
                 "Your file was left as it is and nothing was saved. The app only keeps a result that is " +
-                        "at least 10% smaller and passes the quality check."
+                        "smaller than the original and passes the quality check."
             )
         }
 
@@ -288,23 +295,133 @@ private fun ImagePreview(file: File) {
     }
 }
 
-/** Plays the video with the platform VideoView, so no extra player library is needed. */
+/**
+ * Plays the video with MediaPlayer on a TextureView. Unlike VideoView (a SurfaceView), a TextureView is
+ * drawn as part of the normal UI, so it scrolls, clips and fades together with the rest of the screen.
+ */
 @Composable
 private fun VideoPreview(file: File) {
     key(file.absolutePath) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { ctx ->
-                VideoView(ctx).apply {
-                    val controller = MediaController(ctx)
-                    controller.setAnchorView(this)
-                    setMediaController(controller)
-                    setVideoURI(Uri.fromFile(file))
-                    setOnPreparedListener { seekTo(1) } // show the first frame instead of a black box
+        var player by remember { mutableStateOf<MediaPlayer?>(null) }
+        var surface by remember { mutableStateOf<Surface?>(null) }
+        var prepared by remember { mutableStateOf(false) }
+        var playing by remember { mutableStateOf(false) }
+        var position by remember { mutableIntStateOf(0) }
+        var duration by remember { mutableIntStateOf(0) }
+        var videoRatio by remember { mutableStateOf<Float?>(null) }
+        var failed by remember { mutableStateOf(false) }
+
+        DisposableEffect(Unit) {
+            val mp = MediaPlayer()
+            try {
+                mp.setDataSource(file.absolutePath)
+                mp.setOnPreparedListener {
+                    duration = it.duration
+                    prepared = true
                 }
-            },
-            onRelease = { it.stopPlayback() },
-        )
+                mp.setOnVideoSizeChangedListener { _, w, h ->
+                    if (w > 0 && h > 0) videoRatio = w.toFloat() / h
+                }
+                mp.setOnCompletionListener {
+                    playing = false
+                    position = 0
+                    it.seekTo(0)
+                }
+                mp.setOnErrorListener { _, _, _ ->
+                    failed = true
+                    playing = false
+                    true
+                }
+                mp.prepareAsync()
+                player = mp
+            } catch (_: Exception) {
+                failed = true
+            }
+            onDispose {
+                player = null
+                runCatching { mp.release() }
+            }
+        }
+
+        // Attach the player to the texture, and show the first frame instead of a black box.
+        LaunchedEffect(player, surface, prepared) {
+            val mp = player
+            val sf = surface
+            if (mp != null && sf != null && sf.isValid) {
+                runCatching { mp.setSurface(sf) }
+                if (prepared && !playing) runCatching { mp.seekTo(1) }
+            }
+        }
+
+        LaunchedEffect(playing) {
+            while (playing) {
+                position = runCatching { player?.currentPosition }.getOrNull() ?: 0
+                delay(250)
+            }
+        }
+
+        if (failed) {
+            Text("Cannot preview this video")
+            return@key
+        }
+
+        Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                val ratioModifier = videoRatio?.let { Modifier.aspectRatio(it) } ?: Modifier.fillMaxSize()
+                AndroidView(
+                    modifier = ratioModifier,
+                    factory = { ctx ->
+                        TextureView(ctx).apply {
+                            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                                override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
+                                    surface = Surface(st)
+                                }
+
+                                override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
+
+                                override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                                    runCatching { player?.setSurface(null) }
+                                    surface?.release()
+                                    surface = null
+                                    return true
+                                }
+
+                                override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                            }
+                            setOnClickListener {
+                                val mp = player ?: return@setOnClickListener
+                                if (!prepared) return@setOnClickListener
+                                if (playing) mp.pause() else mp.start()
+                                playing = !playing
+                            }
+                        }
+                    },
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    enabled = prepared,
+                    onClick = {
+                        val mp = player ?: return@TextButton
+                        if (playing) mp.pause() else mp.start()
+                        playing = !playing
+                    },
+                ) { Text(if (playing) "Pause" else "Play") }
+                Slider(
+                    value = position.toFloat(),
+                    onValueChange = {
+                        position = it.toInt()
+                        runCatching { player?.seekTo(position) }
+                    },
+                    valueRange = 0f..duration.coerceAtLeast(1).toFloat(),
+                    enabled = prepared,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
     }
 }
 

@@ -165,7 +165,7 @@ class Compressor(context: Context) {
                 copyExif(input, out)
 
                 val newSize = out.length()
-                if (newSize > originalSize * (1 - MIN_SAVING)) {
+                if (newSize >= originalSize) {
                     out.delete()
                     return@withContext CompressionOutcome.Skipped("Not enough saving")
                 }
@@ -230,7 +230,7 @@ class Compressor(context: Context) {
         }
 
         val newSize = out.length()
-        if (newSize > originalSize * (1 - MIN_SAVING)) {
+        if (newSize >= originalSize) {
             out.delete()
             return CompressionOutcome.Skipped("Not enough saving")
         }
@@ -342,7 +342,6 @@ class Compressor(context: Context) {
         const val MAX_PIXELS = 50_000_000L
         const val MAX_PNG_PIXELS = 24_000_000L
         const val MIN_PNG_SAVING = 0.05
-        const val MIN_SAVING = 0.10
         const val MIN_VIDEO_BITRATE = 2_000_000
         const val MIN_TARGET_BITRATE = 1_000_000
         const val HEADER_SCAN_BYTES = 256 * 1024

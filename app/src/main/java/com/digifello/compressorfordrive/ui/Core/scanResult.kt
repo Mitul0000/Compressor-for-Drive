@@ -4,7 +4,7 @@ const val MIN_IMAGE_BYTES = 500L * 1024
 const val MIN_VIDEO_BYTES = 5L * 1024 * 1024
 
 /** One run handles the biggest files first; this keeps the single permission prompt manageable. */
-const val MAX_FILES_PER_RUN = 3000
+const val MAX_FILES_PER_RUN = 2000
 
 data class KindSummary(val count: Int, val bytes: Long)
 

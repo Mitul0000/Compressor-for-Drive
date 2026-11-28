@@ -324,9 +324,6 @@ private fun ScanTable(scan: ScanResult) {
         TableRow("Videos", scan.videos)
         TableRow("Skipped", scan.skipped)
         Note("Skipped: small files, files already compressed, and formats the app does not handle.")
-        if (scan.eligibleCount > MAX_FILES_PER_RUN) {
-            Note("The ${"%,d".format(MAX_FILES_PER_RUN)} biggest files are handled in each run. Run again for the rest.")
-        }
     }
 }
 
@@ -356,6 +353,16 @@ private fun EstimateSection(state: HomeUiState) {
             val saved = scan.estimatedSavedBytes(state.level)
             Text("Free space after compression: about ${formatBytes(storage.free + saved)} (${formatBytes(saved)} freed)")
             Note("Estimate only. Actual savings depend on your files.")
+            if (scan.eligibleCount > MAX_FILES_PER_RUN) {
+                val runs = (scan.eligibleCount + MAX_FILES_PER_RUN - 1) / MAX_FILES_PER_RUN
+                Text(
+                    "You have ${"%,d".format(scan.eligibleCount)} files to compress. Android allows only " +
+                            "${"%,d".format(MAX_FILES_PER_RUN)} files per permission request, so please run " +
+                            "scan and compression $runs times to finish them all.",
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Note("Each run handles the ${"%,d".format(MAX_FILES_PER_RUN)} biggest remaining files. After a run finishes, tap Scan again and start the next one.")
+            }
         }
     }
 }
