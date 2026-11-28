@@ -1,5 +1,7 @@
 package com.digifello.compressorfordrive.ui.Screens.Navigation
 
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -61,6 +63,12 @@ fun AppNavGraph() {
             navController = navController,
             startDestination = Routes.SPLASH,
             modifier = Modifier.padding(padding),
+            // No screen-to-screen animation. This also stops the Test screen's video (a SurfaceView,
+            // which does not fade with the rest of the UI) from lingering over Main while it fades out.
+            enterTransition = { EnterTransition.None },
+            exitTransition = { ExitTransition.None },
+            popEnterTransition = { EnterTransition.None },
+            popExitTransition = { ExitTransition.None },
         ) {
             composable(Routes.SPLASH) {
                 SplashScreen(
