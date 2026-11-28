@@ -66,6 +66,14 @@ fun HomeScreen(vm: HomeViewModel) {
         ActivityResultContracts.StartIntentSenderForResult()
     ) { vm.onConsentResult(it.data) }
 
+    val accountLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { vm.onAccountPicked(it.data) }
+
+    LaunchedEffect(Unit) {
+        vm.accountPickerRequests.collect { accountLauncher.launch(it) }
+    }
+
     val notificationLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { vm.startCompression() }

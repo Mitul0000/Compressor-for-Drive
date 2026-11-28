@@ -31,8 +31,8 @@ class ScanResultTest {
     @Test
     fun filesOwnedByOthersOrAlreadyHandledAreNotCandidates() {
         assertFalse(file("image/jpeg", 2_000_000, owned = false).isCandidate())
-        assertFalse(file("video/mp4", 5_000_000, state = DriveApi.STATE_DONE).isCandidate())
-        assertFalse(file("video/mp4", 5_000_000, state = DriveApi.STATE_FAILED).isCandidate())
+        assertFalse(file("video/mp4", 5_000_000, state = DriveApi.Companion.STATE_DONE).isCandidate())
+        assertFalse(file("video/mp4", 5_000_000, state = DriveApi.Companion.STATE_FAILED).isCandidate())
     }
 
     @Test

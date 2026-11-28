@@ -37,7 +37,8 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
         try { setForeground(foregroundInfo(0, 0)) } catch (_: Exception) { }
 
         val connect = ConnectDrive(applicationContext)
-        val tokens: suspend () -> String = { connect.accessToken() }
+        // CHANGED: token provider now takes forceRefresh
+        val tokens: suspend (Boolean) -> String = { forceRefresh -> connect.accessToken(forceRefresh) }
         val api = DriveApi(tokens)
         val uploader = DriveUploader(tokens)
         val compressor = Compressor(applicationContext)
@@ -62,7 +63,9 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
         try {
             for (file in pending) {
                 try {
-                    uploader.deleteOldRevisions(file.id)
+                    // CHANGED: pass the stored checksum; skip if we don't have one
+                    val expected = file.expectedMd5 ?: continue
+                    uploader.deleteOldRevisions(file.id, expected)
                     uploader.setState(file.id, DriveApi.STATE_DONE)
                 } catch (e: CancellationException) {
                     throw e
@@ -114,13 +117,25 @@ class CompressionWorker(context: Context, params: WorkerParameters) : CoroutineW
                 is CompressionOutcome.Skipped -> return FileResult(Kind.SKIPPED)
                 is CompressionOutcome.Success -> try {
                     val upload = try {
-                        uploader.replaceFile(file.id, outcome.file, outcome.newName, outcome.mimeType)
+                        // CHANGED: pass modifiedTime and expectedCurrentMd5
+                        uploader.replaceFile(
+                            fileId = file.id,
+                            local = outcome.file,
+                            newName = outcome.newName,
+                            newMimeType = outcome.mimeType,
+                            modifiedTime = file.modifiedTime,
+                            expectedCurrentMd5 = file.md5,
+                        )
+                    } catch (e: SourceChangedException) {
+                        // NEW: file was edited in Drive meanwhile, don't overwrite it
+                        return FileResult(Kind.SKIPPED)
                     } catch (e: UploadVerificationException) {
                         uploader.setState(file.id, DriveApi.STATE_FAILED)
                         throw e
                     }
 
-                    uploader.deleteOldRevisions(file.id)
+                    // CHANGED: pass the md5 of what we uploaded
+                    uploader.deleteOldRevisions(file.id, upload.md5)
 
                     try {
                         uploader.setState(file.id, DriveApi.STATE_DONE)

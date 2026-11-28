@@ -89,7 +89,8 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _consentRequests = MutableSharedFlow<PendingIntent>(extraBufferCapacity = 1)
     val consentRequests: SharedFlow<PendingIntent> = _consentRequests.asSharedFlow()
-
+    private val _accountPickerRequests = MutableSharedFlow<Intent>(extraBufferCapacity = 1)
+    val accountPickerRequests: SharedFlow<Intent> = _accountPickerRequests.asSharedFlow()
     private var workJob: Job? = null
 
     /**
@@ -143,8 +144,14 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             workJob?.cancel()
             connect.disconnect()
             _state.update { HomeUiState(ready = true, level = it.level, wifiOnly = it.wifiOnly, chargingOnly = it.chargingOnly) }
-            connect()
+            _accountPickerRequests.emit(connect.chooseAccountIntent())
         }
+    }
+
+    fun onAccountPicked(data: Intent?) {
+        val email = data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME) ?: return
+        connect.selectAccount(email)
+        connect()
     }
 
     private suspend fun applyConnected(auth: DriveAuthState.Connected) {

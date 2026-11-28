@@ -36,9 +36,21 @@ class ConnectDrive(context: Context) {
     @Volatile
     private var lastToken: String? = null
 
-    private val request: AuthorizationRequest = AuthorizationRequest.builder()
-        .setRequestedScopes(listOf(Scope(DRIVE_SCOPE)))
-        .build()
+    private fun buildRequest(): AuthorizationRequest {
+        val builder = AuthorizationRequest.builder()
+            .setRequestedScopes(listOf(Scope(DRIVE_SCOPE)))
+        savedEmail?.let { builder.setAccount(Account(it, "com.google")) }
+        return builder.build()
+    }
+
+    fun chooseAccountIntent(): Intent = android.accounts.AccountManager.newChooseAccountIntent(
+        null, null, arrayOf("com.google"), null, null, null, null
+    )
+
+    fun selectAccount(email: String) {
+        prefs.edit().putString(KEY_EMAIL, email).apply()
+        lastToken = null
+    }
 
     val savedEmail: String? get() = prefs.getString(KEY_EMAIL, null)
 
@@ -99,7 +111,7 @@ class ConnectDrive(context: Context) {
     }
 
     private suspend fun authorize(): DriveAuthState {
-        val result = client.authorize(request).await()
+        val result = client.authorize(buildRequest()).await()
         return if (result.hasResolution()) {
             DriveAuthState.NeedsConsent(result.pendingIntent!!)
         } else {

@@ -22,7 +22,7 @@ fun List<DriveFile>.toScanResult(): ScanResult {
     return ScanResult(
         photos = eligible.filter { it.kind == FileKind.IMAGE }.summary(),
         videos = eligible.filter { it.kind == FileKind.VIDEO }.summary(),
-        skipped = rest.summary(),
+        skipped = rest.filter { it.ownedByMe }.summary(),
     )
 }
 
