@@ -70,10 +70,7 @@ data class HomeUiState(
     val phase: Phase = Phase.Idle,
     val storage: DeviceStorage? = null,
     val level: CompressionLevel = CompressionLevel.BALANCED,
-    val scope: Scope = Scope.ALL,
-    val sinceSeconds: Long = 0L,
     val chargingOnly: Boolean = false,
-    val dailyCheck: Boolean = false,
     val scan: ScanResult? = null,
     val progress: RunProgress? = null,
     val result: RunResult? = null,
@@ -90,10 +87,7 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
             hasAccess = MediaAccess.hasAccess(app),
             storage = DeviceStorage.read(),
             level = settings.level,
-            scope = settings.scope,
-            sinceSeconds = settings.sinceSeconds,
             chargingOnly = settings.chargingOnly,
-            dailyCheck = settings.dailyCheck,
         )
     )
     val state: StateFlow<HomeUiState> = _state.asStateFlow()
@@ -113,6 +107,8 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
     private var currentRunId: UUID? = null
 
     init {
+        // Older builds had a daily reminder job; make sure it is gone on devices that still have it scheduled.
+        workManager.cancelUniqueWork("auto_check")
         observeWork()
     }
 
@@ -127,38 +123,14 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(level = level).invalidated() }
     }
 
-    fun setScope(scope: Scope) {
-        settings.scope = scope
-        var since = settings.sinceSeconds
-        if (scope == Scope.NEW_ONLY && since == 0L) {
-            since = nowSeconds()
-            settings.sinceSeconds = since
-        }
-        _state.update { it.copy(scope = scope, sinceSeconds = since).invalidated() }
-    }
 
-    /** "From now": only files added after this moment count. */
-    fun startFromNow() {
-        val since = nowSeconds()
-        settings.sinceSeconds = since
-        _state.update { it.copy(sinceSeconds = since).invalidated() }
-    }
+
 
     fun setChargingOnly(value: Boolean) {
         settings.chargingOnly = value
         _state.update { it.copy(chargingOnly = value) }
     }
 
-    fun setDailyCheck(value: Boolean) {
-        settings.dailyCheck = value
-        if (value) {
-            val request = PeriodicWorkRequestBuilder<AutoCheckWorker>(1, TimeUnit.DAYS).build()
-            workManager.enqueueUniquePeriodicWork(AutoCheckWorker.WORK_NAME, ExistingPeriodicWorkPolicy.UPDATE, request)
-        } else {
-            workManager.cancelUniqueWork(AutoCheckWorker.WORK_NAME)
-        }
-        _state.update { it.copy(dailyCheck = value) }
-    }
 
     /** A different level or scope changes which files qualify, so the old scan no longer applies. */
     private fun HomeUiState.invalidated() =
@@ -176,8 +148,7 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(phase = Phase.Scanning, scan = null, error = null) }
             try {
                 val outcome = withContext(Dispatchers.IO) {
-                    val since = if (s.scope == Scope.NEW_ONLY) s.sinceSeconds else null
-                    LocalScanner(app).scan(since).classify(ProcessedStore.forApp(app), s.level)
+                    LocalScanner(app).scan().classify(ProcessedStore.forApp(app), s.level)
                 }
                 candidates = outcome.candidates
                 _state.update {
@@ -305,7 +276,6 @@ class HomeViewModel(private val app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(error = message) }
     }
 
-    private fun nowSeconds() = System.currentTimeMillis() / 1000
 
     private fun Data.toProgress() = RunProgress(
         done = getInt(CompressionWorker.KEY_DONE, 0),

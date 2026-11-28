@@ -56,7 +56,7 @@ fun SplashScreen(onFinished: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Image(
-                painter = painterResource(R.drawable.ic_launcher_foreground),
+                painter = painterResource(R.drawable.splash_logo),
                 contentDescription = "Storage Compressor logo",
                 modifier = Modifier.size(200.dp),
             )

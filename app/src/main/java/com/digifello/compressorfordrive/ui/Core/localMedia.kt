@@ -26,20 +26,20 @@ class LocalScanner(context: Context) {
 
     private val resolver = context.applicationContext.contentResolver
 
-    fun scan(sinceSeconds: Long? = null): List<LocalMedia> {
+    fun scan(): List<LocalMedia> {
         val out = ArrayList<LocalMedia>()
-        query(false, sinceSeconds, null, out)
-        query(true, sinceSeconds, null, out)
+        query(false, null, out)
+        query(true, null, out)
         return out
     }
 
     fun get(isVideo: Boolean, id: Long): LocalMedia? {
         val out = ArrayList<LocalMedia>(1)
-        query(isVideo, null, id, out)
+        query(isVideo, id, out)
         return out.firstOrNull()
     }
 
-    private fun query(isVideo: Boolean, since: Long?, id: Long?, out: MutableList<LocalMedia>) {
+    private fun query(isVideo: Boolean, id: Long?, out: MutableList<LocalMedia>) {
         val mimes = if (isVideo) VIDEO_MIMES else IMAGE_MIMES
         val selection = StringBuilder(
             "${MediaStore.MediaColumns.MIME_TYPE} IN (${mimes.joinToString(",") { "?" }}) " +
@@ -48,10 +48,6 @@ class LocalScanner(context: Context) {
         val args = ArrayList<String>(mimes)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) selection.append(" AND ${MediaStore.MediaColumns.IS_PENDING} = 0")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) selection.append(" AND ${MediaStore.MediaColumns.IS_TRASHED} = 0")
-        since?.let {
-            selection.append(" AND ${MediaStore.MediaColumns.DATE_ADDED} >= ?")
-            args.add(it.toString())
-        }
         id?.let {
             selection.append(" AND ${MediaStore.MediaColumns._ID} = ?")
             args.add(it.toString())

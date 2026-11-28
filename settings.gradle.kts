@@ -22,6 +22,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Compressor for Drive"
+rootProject.name = "Storage Compressor"
 include(":app")
  

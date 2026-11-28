@@ -4,6 +4,5 @@
     <style name="Theme.CompressorForDrive" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/splash_bg</item>
         <item name="android:windowSplashScreenBackground">@color/splash_bg</item>
-        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
-    </style>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_logo</item>    </style>
 </resources>

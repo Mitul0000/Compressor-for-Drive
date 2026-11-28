@@ -4,6 +4,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -89,10 +90,6 @@ fun HomeScreen(vm: HomeViewModel) {
         ActivityResultContracts.RequestPermission()
     ) { vm.requestWriteAccess() }
 
-    val dailyCheckLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted -> vm.setDailyCheck(granted) }
-
     LaunchedEffect(Unit) {
         vm.writeRequests.collect { writeLauncher.launch(IntentSenderRequest.Builder(it).build()) }
     }
@@ -106,13 +103,7 @@ fun HomeScreen(vm: HomeViewModel) {
         actions = Actions(
             onGrantAccess = { permissionLauncher.launch(MediaAccess.permissionsToRequest()) },
             onLevel = vm::setLevel,
-            onScope = vm::setScope,
-            onStartFromNow = vm::startFromNow,
             onChargingOnly = vm::setChargingOnly,
-            onDailyCheck = { on ->
-                if (on && needsNotificationPermission()) dailyCheckLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                else vm.setDailyCheck(on)
-            },
             onScan = vm::scan,
             onStart = { confirmStart = true },
             onStop = vm::stop,
@@ -146,10 +137,7 @@ fun HomeScreen(vm: HomeViewModel) {
 private class Actions(
     val onGrantAccess: () -> Unit,
     val onLevel: (CompressionLevel) -> Unit,
-    val onScope: (Scope) -> Unit,
-    val onStartFromNow: () -> Unit,
     val onChargingOnly: (Boolean) -> Unit,
-    val onDailyCheck: (Boolean) -> Unit,
     val onScan: () -> Unit,
     val onStart: () -> Unit,
     val onStop: () -> Unit,
@@ -159,7 +147,10 @@ private class Actions(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun HomeContent(state: HomeUiState, actions: Actions) {
-    Scaffold(topBar = { TopAppBar(title = { Text("Storage Compressor") }) }) { padding ->
+    Scaffold(
+        topBar = { TopAppBar(title = { Text("Storage Compressor") }) },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
+    ) { padding ->
         Column(
             modifier = Modifier
                 .padding(padding)
@@ -233,32 +224,38 @@ private fun StorageSection(state: HomeUiState) {
 }
 
 @Composable
+@Composable
 private fun QualitySection(state: HomeUiState, onLevel: (CompressionLevel) -> Unit) {
-    val enabled = state.phase != Phase.Running
     Section("Compression quality") {
-        Column(modifier = Modifier.selectableGroup().alpha(if (enabled) 1f else 0.5f)) {
-            LevelOption(
-                "Quality preserved",
-                "Looks identical to the original. PNG files are shrunk with no loss at all. Smallest saving.",
-                CompressionLevel.PRESERVED, state.level, enabled, onLevel,
-            )
-            LevelOption(
-                "Balanced (recommended)",
-                "A slight loss you are unlikely to notice. Good saving.",
-                CompressionLevel.BALANCED, state.level, enabled, onLevel,
-            )
-            LevelOption(
-                "Max storage",
-                "Frees the most space, with a small drop in quality. Videos are capped at 1080p.",
-                CompressionLevel.MAX_SAVING, state.level, enabled, onLevel,
-            )
-        }
-        Note("Each result is checked against the original. Files that would look noticeably worse are left untouched.")
+        LevelPicker(state.level, state.phase != Phase.Running, onLevel)
     }
 }
 
+/** The three quality options. Shared by the Main and Test screens. */
 @Composable
-private fun LevelOption(
+internal fun LevelPicker(selected: CompressionLevel, enabled: Boolean, onLevel: (CompressionLevel) -> Unit) {
+    Column(modifier = Modifier.selectableGroup().alpha(if (enabled) 1f else 0.5f)) {
+        LevelOption(
+            "Quality preserved",
+            "Looks identical to the original. PNG files are shrunk with no loss at all. Smallest saving.",
+            CompressionLevel.PRESERVED, selected, enabled, onLevel,
+        )
+        LevelOption(
+            "Balanced (recommended)",
+            "A slight loss you are unlikely to notice. Good saving.",
+            CompressionLevel.BALANCED, selected, enabled, onLevel,
+        )
+        LevelOption(
+            "Max storage",
+            "Frees the most space, with a small drop in quality. Videos are capped at 1080p.",
+            CompressionLevel.MAX_SAVING, selected, enabled, onLevel,
+        )
+    }
+    Note("Each result is checked against the original. Files that would look noticeably worse are left untouched.")
+}
+
+@Composable
+internal fun LevelOption(
     title: String,
     description: String,
     value: CompressionLevel,
@@ -284,23 +281,9 @@ private fun LevelOption(
 @Composable
 private fun OptionsSection(state: HomeUiState, actions: Actions) {
     val enabled = state.phase != Phase.Running
-    Section("What to compress") {
-        Column(modifier = Modifier.selectableGroup().alpha(if (enabled) 1f else 0.5f)) {
-            ScopeOption("All photos and videos", Scope.ALL, state.scope, enabled, actions.onScope)
-            ScopeOption("Only new files from now on", Scope.NEW_ONLY, state.scope, enabled, actions.onScope)
-        }
-        if (state.scope == Scope.NEW_ONLY) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween,
-                modifier = Modifier.fillMaxWidth()) {
-                Note("Counting files added after ${formatDate(state.sinceSeconds)}", modifier = Modifier.weight(1f))
-                TextButton(onClick = actions.onStartFromNow, enabled = enabled) { Text("Start from now") }
-            }
-        }
+    Section("Options") {
         Column(modifier = Modifier.alpha(if (enabled) 1f else 0.5f)) {
             CheckOption("Only while charging", state.chargingOnly, enabled, actions.onChargingOnly)
-            if (state.scope == Scope.NEW_ONLY) {
-                CheckOption("Check daily and remind me about new files", state.dailyCheck, enabled, actions.onDailyCheck)
-            }
         }
     }
 }
@@ -432,7 +415,7 @@ private fun ResultSection(state: HomeUiState) {
 }
 
 @Composable
-private fun ResultRow(label: String, value: String) {
+internal fun ResultRow(label: String, value: String) {
     Row(modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label)
         Text(value)
@@ -440,7 +423,7 @@ private fun ResultRow(label: String, value: String) {
 }
 
 @Composable
-private fun Section(title: String, content: @Composable () -> Unit) {
+internal fun Section(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(title, style = MaterialTheme.typography.titleMedium)
         content()
@@ -448,7 +431,7 @@ private fun Section(title: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun Note(text: String, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
+internal fun Note(text: String, modifier: Modifier = Modifier, maxLines: Int = Int.MAX_VALUE) {
     Text(
         text = text,
         modifier = modifier,
@@ -460,7 +443,7 @@ private fun Note(text: String, modifier: Modifier = Modifier, maxLines: Int = In
 }
 
 @Composable
-private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
+internal fun ErrorBanner(message: String, onDismiss: () -> Unit) {
     OutlinedCard(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp, end = 4.dp),
@@ -472,10 +455,7 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
     }
 }
 
-private fun formatDate(epochSeconds: Long): String =
-    DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(epochSeconds * 1000))
-
-private fun formatBytes(bytes: Long): String {
+internal fun formatBytes(bytes: Long): String {
     if (bytes < 1024) return "$bytes B"
     val units = listOf("KB", "MB", "GB", "TB")
     var value = bytes.toDouble()
@@ -489,8 +469,7 @@ private fun formatBytes(bytes: Long): String {
 
 private val sampleStorage = DeviceStorage(total = 128L shl 30, free = 9L shl 30)
 private val sampleScan = ScanResult(KindSummary(840, 5L shl 30), KindSummary(60, 4L shl 30), KindSummary(340, 2L shl 30))
-private val noActions = Actions({}, {}, {}, {}, {}, {}, {}, {}, {}, {})
-
+private val noActions = Actions({}, {}, {}, {}, {}, {}, {})
 @Preview(showBackground = true)
 @Composable
 private fun PreviewScanned() = CompressorForDriveTheme(dynamicColor = false) {
